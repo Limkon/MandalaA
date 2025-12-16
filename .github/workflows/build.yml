@@ -1,11 +1,7 @@
 name: Build Android App
 
 on:
-  push:
-    branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
-  workflow_dispatch: # 允许手动触发构建
+   workflow_dispatch: # 允许手动触发构建
 
 jobs:
   build:
