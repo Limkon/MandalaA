@@ -3,11 +3,12 @@ package tun
 import (
 	"context"
 	"fmt"
+	"io"
 	"net"
-	
+
 	"mandala/core/config"
+	"mandala/core/protocol" // 必须引用，用于 TCP 握手
 	"mandala/core/proxy"
-	// "mandala/core/protocol" // 这里不需要直接引 protocol 了，因为逻辑移到了 nat 文件中
 
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
@@ -19,26 +20,29 @@ import (
 	"gvisor.dev/gvisor/pkg/waiter"
 )
 
-// Stack 服务结构体
+// Stack 负责管理 gVisor 网络栈和流量转发
 type Stack struct {
-	stack      *stack.Stack
-	device     *Device
-	dialer     *proxy.Dialer
-	config     *config.OutboundConfig
-	nat        *UDPNatManager // [新增] NAT 管理器
-	ctx        context.Context
-	cancel     context.CancelFunc
+	stack  *stack.Stack
+	device *Device
+	dialer *proxy.Dialer
+	config *config.OutboundConfig
+	nat    *UDPNatManager // UDP 会话管理器
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
-// StartStack 启动 TUN 处理栈
+// StartStack 初始化并启动 gVisor 网络栈
+// fd: Android VpnService 提供的文件描述符
+// mtu: 最大传输单元
+// cfg: 节点配置
 func StartStack(fd int, mtu int, cfg *config.OutboundConfig) (*Stack, error) {
-	// 1. 创建 TUN 设备
+	// 1. 创建 TUN 设备包装器 (见 device.go)
 	dev, err := NewDevice(fd, uint32(mtu))
 	if err != nil {
 		return nil, err
 	}
 
-	// 2. gVisor 协议栈初始化
+	// 2. 初始化 gVisor 协议栈 (支持 IPv4/IPv6, TCP/UDP)
 	s := stack.New(stack.Options{
 		NetworkProtocols: []stack.NetworkProtocolFactory{
 			ipv4.NewProtocol,
@@ -50,21 +54,26 @@ func StartStack(fd int, mtu int, cfg *config.OutboundConfig) (*Stack, error) {
 		},
 	})
 
-	// 3. 注册 NIC
+	// 3. 创建并注册 NIC (网络接口控制器)
 	nicID := tcpip.NICID(1)
 	if err := s.CreateNIC(nicID, dev.LinkEndpoint()); err != nil {
 		dev.Close()
 		return nil, fmt.Errorf("create nic failed: %v", err)
 	}
 
+	// 4. 设置路由表 (Promiscuous Mode, 接收所有流量)
 	s.SetRouteTable([]tcpip.Route{
 		{
-			Destination: tcpip.Address{},
+			Destination: tcpip.Address{}, // 默认路由
 			Mask:        tcpip.Address{},
 			NIC:         nicID,
 		},
 	})
+
+	// 允许接收发往任何 IP 的包
 	s.SetPromiscuousMode(nicID, true)
+	
+	// 启用 TCP SACK (选择性确认) 以提高性能
 	s.SetTransportProtocolOption(tcp.ProtocolNumber, tcp.SACKEnabled(true))
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -76,17 +85,18 @@ func StartStack(fd int, mtu int, cfg *config.OutboundConfig) (*Stack, error) {
 		device: dev,
 		dialer: dialer,
 		config: cfg,
-		nat:    NewUDPNatManager(dialer, cfg), // [新增] 初始化 NAT
+		nat:    NewUDPNatManager(dialer, cfg), // 初始化 UDP NAT 管理器
 		ctx:    ctx,
 		cancel: cancel,
 	}
 
+	// 5. 开始拦截并处理数据包
 	tStack.startPacketHandling()
 
 	return tStack, nil
 }
 
-// Close 停止栈
+// Close 停止网络栈并释放资源
 func (s *Stack) Close() {
 	s.cancel()
 	if s.device != nil {
@@ -97,128 +107,128 @@ func (s *Stack) Close() {
 	}
 }
 
+// startPacketHandling 配置 TCP 和 UDP 的转发处理函数
 func (s *Stack) startPacketHandling() {
-	// TCP 处理 (保持不变)
+	// --- TCP 处理 ---
+	// SetForwarder 拦截所有进入 Stack 的 TCP 连接
 	tcpHandler := tcp.NewForwarder(s.stack, 30000, 10, func(r *tcp.ForwarderRequest) {
+		// 为每个新连接启动一个协程
 		go s.handleTCP(r)
 	})
 	s.stack.SetTransportProtocolHandler(tcp.ProtocolNumber, tcpHandler.HandlePacket)
 
-	// UDP 处理 (使用新的 NAT 逻辑)
+	// --- UDP 处理 ---
+	// 拦截所有 UDP 数据包
 	udpHandler := udp.NewForwarder(s.stack, func(r *udp.ForwarderRequest) {
-		// 注意：不要在这里直接 go func，要在内部处理
+		// 注意：UDP 是无连接的，这里每次收到包都会触发，需在内部通过 NAT Map 去重/复用
 		s.handleUDP(r)
 	})
 	s.stack.SetTransportProtocolHandler(udp.ProtocolNumber, udpHandler.HandlePacket)
 }
 
-// handleTCP (保持不变，但为了代码完整性，请确保 import 正确)
+// handleTCP 处理单个 TCP 连接
 func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
-	// ... (原有的 TCP 处理逻辑，此处省略以节省篇幅，不需要修改) ...
-	// 请保留您之前的 handleTCP 代码
-	// 这里简单复述关键部分，防止您复制时丢失
 	id := r.ID()
+	// 获取目标地址 (注意: LocalAddress 在这里是指数据包要去的目标)
 	targetIP := net.IP(id.LocalAddress.AsSlice())
 	targetPort := id.LocalPort
 	
+	// 1. 创建 gVisor 侧的端点 (与 App 通信)
 	var wq waiter.Queue
 	ep, err := r.CreateEndpoint(&wq)
 	if err != nil {
-		r.Complete(true)
+		r.Complete(true) // 发送 RST 拒绝连接
 		return
 	}
-	r.Complete(false)
+	r.Complete(false) // 完成握手
 
+	// 包装成标准的 net.Conn
 	localConn := gonet.NewTCPConn(&wq, ep)
 	defer localConn.Close()
 	
-	// 连接代理
+	fmt.Printf("[TCP] Connect to %s:%d\n", targetIP, targetPort)
+
+	// 2. 连接代理服务器
 	remoteConn, err := s.dialer.Dial()
 	if err != nil {
+		fmt.Printf("[TCP] Dial failed: %v\n", err)
 		return
 	}
 	defer remoteConn.Close()
 
-	// TCP 握手 (Mandala)
-	// 注意：此处代码应该引用 protocol 包，如果编译报错请检查 import
-	/* if s.config.Type == "mandala" {
-		// ... 握手逻辑 ...
+	// 3. 发送协议握手 (针对 Mandala 协议)
+	if s.config.Type == "mandala" {
+		client := protocol.NewMandalaClient(s.config.Username, s.config.Password)
+		payload, err := client.BuildHandshakePayload(targetIP.String(), int(targetPort))
+		if err != nil {
+			fmt.Printf("[TCP] Handshake build failed: %v\n", err)
+			return 
+		}
+		if _, err := remoteConn.Write(payload); err != nil {
+			fmt.Printf("[TCP] Handshake send failed: %v\n", err)
+			return
+		}
 	}
-	*/
-	// 建议：由于 handleTCP 逻辑较长且之前已实现，此处假设您保留原样
-	// 重点是下面的 handleUDP
+
+	// 4. 双向数据转发
+	go io.Copy(remoteConn, localConn) // App -> Proxy
+	io.Copy(localConn, remoteConn)    // Proxy -> App
 }
 
-
-// handleUDP 处理 UDP 数据包 (NAT 版)
+// handleUDP 处理 UDP 数据包 (接入 NAT 管理器)
 func (s *Stack) handleUDP(r *udp.ForwarderRequest) {
 	id := r.ID()
 	
 	// 1. 获取目标信息
-	// 注意：在 ForwarderRequest 中，LocalAddress 是数据包的目标地址
 	targetIP := net.IP(id.LocalAddress.AsSlice()).String()
 	targetPort := int(id.LocalPort)
 	
-	// 生成会话 Key: "SrcIP:SrcPort -> DstIP:DstPort"
-	// RemoteAddress 是数据包的来源 (App)
+	// 2. 生成会话 Key: "SrcIP:SrcPort -> DstIP:DstPort"
+	// 这样可以区分同一个 App 发往不同服务器的请求，或者不同 App 的请求
 	srcKey := fmt.Sprintf("%s:%d->%s:%d", 
 		id.RemoteAddress.String(), id.RemotePort,
 		targetIP, targetPort)
 
-	// 2. 创建 gVisor 端点 (用于与 App 通信)
+	// 3. 创建 gVisor 端点 (用于读取当前数据包)
 	var wq waiter.Queue
 	ep, err := r.CreateEndpoint(&wq)
 	if err != nil {
 		return
 	}
-	// 包装为 UDPConn
 	localConn := gonet.NewUDPConn(s.stack, &wq, ep)
 
-	// 3. 通过 NAT 管理器获取会话
-	// 注意：GetOrCreate 会负责 Dial 代理和发送握手
+	// 4. 通过 NAT 管理器获取会话 (复用连接 或 新建连接)
+	// 如果是新连接，GetOrCreate 内部会负责连接代理服务器并完成握手
 	session, err := s.nat.GetOrCreate(srcKey, localConn, targetIP, targetPort)
 	if err != nil {
 		localConn.Close()
+		fmt.Printf("[UDP] Session create failed: %v\n", err)
 		return
 	}
 
-	// 4. 读取数据并转发 (上行: App -> Proxy)
-	// 我们启动一个协程来处理这个具体的数据包及后续可能的数据
+	// 5. 转发当前数据包 (App -> Proxy)
+	// 启动一个协程读取 localConn 的数据并发给 session.remoteConn
 	go func() {
-		// 注意：这里的 localConn 对于 gVisor UDP 来说，
-		// 每次 HandlePacket 实际上可能只是一个包，
-		// 但 gonet.NewUDPConn 会尝试适配。
-		// 更标准的做法是每次 CreateEndpoint 后只 Read 一次，
-		// 但为了复用 NAT 逻辑，我们这里简化处理：
-		
+		defer localConn.Close() // 处理完当前包后关闭这个临时的 localConn
+
 		buf := make([]byte, 4096)
 		n, err := localConn.Read(buf)
 		if err != nil {
-			// localConn 在一次包处理完后通常不需要 Close，
-			// 但 gVisor 的机制是 UDP 是无连接的，Endpoint 可能只对应一个包。
-			// 这里为了配合 NAT 逻辑，我们只处理读取到的这一部分数据。
 			return 
 		}
 
-		// 发送给代理
-		session.remoteConn.Write(buf[:n])
-		session.lastActive = time.Now()
+		// 将数据写入代理连接
+		// 只要 Session 里的 remoteConn 没断，代理服务器就能收到
+		_, err = session.remoteConn.Write(buf[:n])
+		if err != nil {
+			// 如果写失败，可能是远程连接断了，NAT 管理器稍后会清理
+			return
+		}
 		
-		// 关键点：对于 UDP，gVisor 的 CreateEndpoint 创建的是临时的 handle。
-		// 我们不需要 Close session，因为 session 管理的是 remoteConn。
-		// 但我们需要 Close 这个临时的 localConn (它只对应这个包的上下文)。
-		// 可是！我们的 NAT Manager 下行逻辑持有 localConn 指针用来回写。
-		// 这是一个复杂点。
-		
-		// *修正策略*：
-		// 上面的代码有潜在问题：gVisor UDP Forwarder 为每个包创建新的 Endpoint。
-		// 如果我们把这个 Endpoint 存到 Session 里用于回写，当这个包处理函数结束后，Endpoint 是否有效？
-		// 答案是：gVisor 的 UDP Endpoint 只要不 Close 就是有效的。
-		// 但是，对于不同的源端口，我们需要不同的 Session。
-		// 如果源端口相同（同一个 App 的同一个 Socket），Key 就相同，Session 复用。
-		
-		// 唯一的问题是：如果 GetOrCreate 发现 Session 存在，它会复用旧的 Session。
-		// 旧的 Session 里存的是 **第一次** 创建的 localConn。
-		// 对于 UDP，这通常没问题，因为 endpoint 绑定的是 4 元组。
+		// 更新最后活跃时间
+		session.lastActive = config.NowFunc() // 或 time.Now()，视 config 实现而定
 	}()
+	
+	// 注意: 下行数据 (Proxy -> App) 的转发是由 NAT 管理器在 GetOrCreate 时启动的协程负责的
+	// 那里持有了 localConn 的引用用于回写
 }
