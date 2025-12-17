@@ -36,7 +36,7 @@ func StartStack(fd int, mtu int, cfg *config.OutboundConfig) (*Stack, error) {
 		return nil, err
 	}
 
-	// 1. 初始化協議棧
+	// 1. 初始化协议栈
 	s := stack.New(stack.Options{
 		NetworkProtocols: []stack.NetworkProtocolFactory{
 			ipv4.NewProtocol,
@@ -54,7 +54,7 @@ func StartStack(fd int, mtu int, cfg *config.OutboundConfig) (*Stack, error) {
 		return nil, fmt.Errorf("create nic failed: %v", err)
 	}
 
-	// 2. [適配舊庫] 路由表使用 Mask
+	// 2. [适配旧库] 路由表使用 Mask
 	s.SetRouteTable([]tcpip.Route{
 		{
 			Destination: tcpip.Address{}, // 0.0.0.0
@@ -64,8 +64,8 @@ func StartStack(fd int, mtu int, cfg *config.OutboundConfig) (*Stack, error) {
 	})
 
 	s.SetPromiscuousMode(nicID, true)
-	
-	// 3. [適配舊庫] SACK 設置
+
+	// 3. [适配旧库] SACK 设置
 	s.SetTransportProtocolOption(tcp.ProtocolNumber, tcp.SACKEnabled(true))
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -111,7 +111,7 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 	id := r.ID()
 	targetIP := net.IP(id.LocalAddress.AsSlice())
 	targetPort := id.LocalPort
-	
+
 	var wq waiter.Queue
 	ep, err := r.CreateEndpoint(&wq) // err is tcpip.Error
 	if err != nil {
@@ -122,10 +122,10 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 
 	localConn := gonet.NewTCPConn(&wq, ep)
 	defer localConn.Close()
-	
+
 	fmt.Printf("[TCP] Connect to %s:%d\n", targetIP, targetPort)
 
-	// [關鍵修復] 使用 dialErr 避免變量類型衝突
+	// [关键修复] 使用 dialErr 避免变量类型冲突
 	remoteConn, dialErr := s.dialer.Dial()
 	if dialErr != nil {
 		return
@@ -135,8 +135,12 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 	if s.config.Type == "mandala" {
 		client := protocol.NewMandalaClient(s.config.Username, s.config.Password)
 		payload, hsErr := client.BuildHandshakePayload(targetIP.String(), int(targetPort))
-		if hsErr != nil { return }
-		if _, wErr := remoteConn.Write(payload); wErr != nil { return }
+		if hsErr != nil {
+			return
+		}
+		if _, wErr := remoteConn.Write(payload); wErr != nil {
+			return
+		}
 	}
 
 	go io.Copy(remoteConn, localConn)
@@ -147,8 +151,8 @@ func (s *Stack) handleUDP(r *udp.ForwarderRequest) {
 	id := r.ID()
 	targetIP := net.IP(id.LocalAddress.AsSlice()).String()
 	targetPort := int(id.LocalPort)
-	
-	srcKey := fmt.Sprintf("%s:%d->%s:%d", 
+
+	srcKey := fmt.Sprintf("%s:%d->%s:%d",
 		id.RemoteAddress.String(), id.RemotePort,
 		targetIP, targetPort)
 
@@ -157,11 +161,11 @@ func (s *Stack) handleUDP(r *udp.ForwarderRequest) {
 	if err != nil {
 		return
 	}
-	
-	// [關鍵修復] 舊庫需要 3 個參數：(stack, wq, ep)
+
+	// [关键修复] 旧库需要 3 个参数：(stack, wq, ep)
 	localConn := gonet.NewUDPConn(s.stack, &wq, ep)
 
-	// [關鍵修復] 使用 natErr 避免衝突
+	// [关键修复] 使用 natErr 避免冲突
 	session, natErr := s.nat.GetOrCreate(srcKey, localConn, targetIP, targetPort)
 	if natErr != nil {
 		localConn.Close()
@@ -171,8 +175,18 @@ func (s *Stack) handleUDP(r *udp.ForwarderRequest) {
 	go func() {
 		defer localConn.Close()
 		buf := make([]byte, 4096)
-		n, rErr := localConn.Read(buf)
-		if rErr != nil { return }
-		session.RemoteConn.Write(buf[:n])
+		
+		// [严重修复] 必须使用 for 循环持续读取数据包，否则只会转发第一个包（导致 DNS 失败）
+		for {
+			n, rErr := localConn.Read(buf)
+			if rErr != nil {
+				return
+			}
+			
+			// 写入远程连接 (如果远程连接已关闭，Write 会报错并退出循环)
+			if _, wErr := session.RemoteConn.Write(buf[:n]); wErr != nil {
+				return
+			}
+		}
 	}()
 }
