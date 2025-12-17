@@ -18,53 +18,64 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      # 3. 设置 Go 环境
+      # 3. 设置 Go 环境（升级到 1.24 以兼容最新 gomobile）
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.22'  # 保持 1.22，更兼容
+          go-version: '1.24'
           cache: true
 
-      # 4. 安装 Gomobile 和 Gobind（关键：同时安装两者）
-      - name: Install Gomobile and Gobind
+      # 4. 安装 Gomobile 和 Gobind，并修复 bind 包缺失
+      - name: Install Gomobile and Fix Bind Package
         run: |
+          # 关闭 modules，使用 GOPATH 模式（gomobile 经典 workaround）
+          export GO111MODULE=off
+          
+          # 安装 gomobile 和 gobind
           go install golang.org/x/mobile/cmd/gomobile@latest
           go install golang.org/x/mobile/cmd/gobind@latest
+          
+          # 显式安装 bind 包（解决 "no Go package in golang.org/x/mobile/bind"）
+          go get golang.org/x/mobile/bind
           
           # 加入 PATH
           echo "$HOME/go/bin" >> $GITHUB_PATH
           
           # 调试输出
           gomobile version
-          which gobind || echo "gobind not found"
-          gobind -h || echo "gobind help failed"
+          which gobind
+          go list golang.org/x/mobile/bind || echo "bind still not listed, but installed in GOPATH"
 
       # 5. （可选）gomobile init
       - name: Gomobile Init (可选，可忽略失败)
         run: |
-          gomobile init || echo "gomobile init failed (常见于 CI)，继续尝试 bind"
+          gomobile init || echo "gomobile init failed (常见于 CI，无 NDK)，但 bind 通常仍能工作"
 
-      # 6. 编译 Go 核心为 AAR（添加依赖拉取）
+      # 6. 编译 Go 核心为 AAR（在 GOPATH 模式下运行）
       - name: Build Core AAR
         working-directory: ./mandala-go
+        env:
+          GO111MODULE: off  # 确保 bind 在 GOPATH 模式下可用
         run: |
           echo "Building Mandala Core..."
           
-          # 强制添加 mobile 依赖并同步（确保 bind 包可用）
-          go get golang.org/x/mobile@latest
-          go mod tidy
+          # 清理依赖（GOPATH 模式下）
+          go clean -modcache
+          go get ./mobile
           
-          # 调试：检查 bind 包是否可用
-          go list golang.org/x/mobile/bind || echo "bind package not found (but may still work)"
-          
-          # 生成 AAR
+          # 生成 AAR（添加 -v 查看详细日志）
           gomobile bind -v -target=android -androidapi 21 -o ../android/app/libs/mandala.aar ./mobile
 
       # 7. 验证 AAR 是否生成
       - name: Verify AAR Existence
         run: |
-          ls -lh android/app/libs/ || echo "No files in libs"
-          file android/app/libs/mandala.aar || echo "AAR not generated"
+          ls -lh android/app/libs/ || echo "No libs directory"
+          if [ -f android/app/libs/mandala.aar ]; then
+            echo "AAR generated successfully!"
+            file android/app/libs/mandala.aar
+          else
+            echo "AAR not generated"
+          fi
 
       # 8. 设置 Gradle 环境
       - name: Setup Gradle
@@ -76,7 +87,7 @@ jobs:
       - name: Build with Gradle
         working-directory: ./android
         run: |
-          ./gradlew assembleDebug --stacktrace --no-daemon --info
+          ./gradlew assembleDebug --stacktrace --info --no-daemon
 
       # 10. 上传 APK 产物
       - name: Upload APK
