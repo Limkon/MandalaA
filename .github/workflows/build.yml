@@ -1,5 +1,4 @@
 name: Build Android App
-
 on:
   workflow_dispatch: # 仅允许手动触发构建
 
@@ -7,7 +6,6 @@ jobs:
   build:
     name: Build Go Core & Android APK
     runs-on: ubuntu-latest
-
     steps:
       # 1. 检出代码
       - name: Checkout Repository
@@ -20,51 +18,67 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      # 3. 设置 Go 环境 (用于编译核心库)
+      # 3. 设置 Go 环境
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          # 使用兼容 gomobile 稳定版本的 Go 1.23
-          go-version: '1.23' 
-          cache: true # 开启 Go 缓存加速构建
+          go-version: '1.22'  # 推荐降级到 1.22，gomobile 与 Go 1.23 兼容性较差
+          cache: true
 
-      # 4. 安装 Gomobile 工具链
-      - name: Install Gomobile
+      # 4. 安装 Gomobile 和 Gobind（关键修复）
+      - name: Install Gomobile and Gobind
         run: |
-          go install golang.org/x/mobile/cmd/gomobile@latest
-          gomobile init
+          # 使用一个已知稳定的 gomobile 版本（避免 latest 带来的不稳定）
+          go install golang.org/x/mobile/cmd/gomobile@v0.0.0-20221123193718-2c3d3d9f6e1e
+          go install golang.org/x/mobile/cmd/gobind@v0.0.0-20221123193718-2c3d3d9f6e1e
+          
+          # 将 go bin 目录加入 PATH
+          echo "$HOME/go/bin" >> $GITHUB_PATH
+          
+          # 输出版本用于调试
+          gomobile version
+          gobind -h
 
-      # 5. 编译 Go 核心为 AAR (修复：移除冲突的 -tags=bind 标签)
+      # 5. （可选）运行 gomobile init
+      #    注意：在 GitHub Actions 中 init 经常因缺少 NDK/cmake 而失败
+      #    但安装了 gobind 后，很多情况下 bind 也能正常工作，可先尝试不 init
+      - name: Gomobile Init (可选，失败可忽略)
+        run: |
+          gomobile init || echo "gomobile init failed, but may still work with pre-installed gobind"
+
+      # 6. 编译 Go 核心为 AAR
       - name: Build Core AAR
         working-directory: ./mandala-go
         run: |
           echo "Building Mandala Core..."
           
-          # 清理和同步模块依赖
+          # 清理并同步依赖
           go mod tidy
           
-          # 编译 Go 代码生成 .aar
-          # 【最终修复】移除 -tags=bind 标志。此标志与 go mod tidy 冲突，且通常由 gomobile 内部处理。
-          # 保留 -androidapi 21 修复。
+          # 使用 gomobile bind 生成 AAR
+          # 已移除 -tags=bind（gomobile 内部处理）
+          # 保留 -androidapi 21
           gomobile bind -target=android -androidapi 21 -o ../android/app/libs/mandala.aar ./mobile
 
-      # 6. 验证 AAR 是否生成 (用于调试)
+      # 7. 验证 AAR 是否生成
       - name: Verify AAR Existence
         run: |
           ls -lh android/app/libs/
+          file android/app/libs/mandala.aar || true
 
-      # 7. 设置 Gradle 环境
+      # 8. 设置 Gradle 环境
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v3
         with:
-           gradle-version: '8.5'
+          gradle-version: '8.5'
 
-      # 8. 构建 Android APK (直接使用 gradle 命令)
+      # 9. 构建 Android APK
       - name: Build with Gradle
         working-directory: ./android
-        run: gradle assembleDebug --stacktrace
+        run: |
+          ./gradlew assembleDebug --stacktrace --no-daemon
 
-      # 9. 上传 APK 产物
+      # 10. 上传 APK 产物
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
