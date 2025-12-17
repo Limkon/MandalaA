@@ -5,10 +5,10 @@ go 1.20
 require (
 	golang.org/x/sys v0.15.0
 	golang.org/x/time v0.5.0
-	// [方案3核心] 强制锁定 gVisor 到 2023.12 的稳定版
-	// 这是 tun2socks 和 WireGuard 生态目前广泛使用的兼容版本
-	gvisor.dev/gvisor v0.0.0-20231202080848-1f48d6a80442
-	
-	// 引入 WireGuard 的 tun 模块（可选，但在处理 Android FD 时非常稳健）
-	golang.zx2c4.com/wireguard v0.0.0-20231211153847-12269c276173
+	golang.org/x/net v0.19.0
+	gvisor.dev/gvisor v0.0.0-20231202080848-1f48d6a80442 // 先写个占位，CI 会更新
 )
+
+// 强制替换为一个已知有效的、较新的 gVisor 版本
+// 这个版本已经包含了 Subnet API 变更
+replace gvisor.dev/gvisor => gvisor.dev/gvisor v0.0.0-20240408034247-4148b874457e
