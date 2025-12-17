@@ -16,27 +16,29 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
+      # 安装 32位库兼容性支持 (aapt2 需要)
       - name: Install libraries for AAPT2
         run: |
           sudo dpkg --add-architecture i386
           sudo apt-get update
           sudo apt-get install -y libc6:i386 libstdc++6:i386 lib32z1 zlib1g:i386
 
+      # [修复] 使用稳定的 Go 版本 (1.24 尚未发布，使用 1.21)
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.24'
+          go-version: '1.21'
           cache: true
 
       - name: Install Gomobile Toolchain
         run: |
-          # 安装与 go.mod 版本一致的工具
-          VERSION="v0.0.0-20231127183840-76ac6878050a"
-          go install golang.org/x/mobile/cmd/gomobile@$VERSION
-          go install golang.org/x/mobile/cmd/gobind@$VERSION
+          # 安装 Gomobile
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          go install golang.org/x/mobile/cmd/gobind@latest
           
           echo "$HOME/go/bin" >> $GITHUB_PATH
-          gomobile version || echo "gomobile version check skipped"
+          # 初始化 gomobile 环境
+          gomobile init
 
       - name: Prepare AAR Output Directory
         run: |
@@ -47,17 +49,14 @@ jobs:
         working-directory: ./mandala-go
         run: |
           echo "Building Mandala Core..."
-          rm -rf vendor
-          
-          # [关键验证] 运行 tidy。因为有了 tools.go，它会自动下载并保留 mobile/bind 包
+          # 清理依赖
           go mod tidy
           
-          # 验证依赖是否存在 (用于调试)
-          ls -d $(go env GOPATH)/pkg/mod/golang.org/x/mobile* || echo "Mobile package not found in cache"
-          
-          # 编译
+          # [关键] 编译生成 AAR
+          # 注意：-o 的路径必须指向 android/app/libs/mandala.aar
           gomobile bind -v -target=android -androidapi 21 \
-            -o $(pwd)/../android/app/libs/mandala.aar ./mobile
+            -ldflags="-s -w" \
+            -o ../android/app/libs/mandala.aar ./mobile
 
       - name: Verify AAR Existence
         run: |
@@ -77,6 +76,7 @@ jobs:
       - name: Build with Gradle
         working-directory: ./android
         run: |
+          chmod +x gradlew
           ./gradlew assembleDebug --stacktrace --info --no-daemon
 
       - name: Upload APK
