@@ -1,4 +1,4 @@
-// 文件路徑: android/app/src/main/java/com/example/mandala/ui/home/HomeScreen.kt
+// 文件路径: android/app/src/main/java/com/example/mandala/ui/home/HomeScreen.kt
 
 package com.example.mandala.ui.home
 
@@ -29,7 +29,7 @@ fun HomeScreen(viewModel: MainViewModel) {
     val currentNode by viewModel.currentNode.collectAsState()
     val logs by viewModel.logs.collectAsState()
 
-    // 連接時的旋轉動畫
+    // 连接时的旋转动画
     val infiniteTransition = rememberInfiniteTransition(label = "spin_transition")
     val angle by infiniteTransition.animateFloat(
         initialValue = 0f,
@@ -45,33 +45,33 @@ fun HomeScreen(viewModel: MainViewModel) {
             .padding(16.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        // --- 頂部欄 ---
+        // --- 顶部栏 ---
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
-                "Mandala", 
+                "Mandala", // APP 名称通常保持原样或改为中文名
                 fontSize = 28.sp, 
                 fontWeight = FontWeight.Bold, 
                 color = MaterialTheme.colorScheme.primary
             )
-            IconButton(onClick = { /* TODO: 實現掃碼 */ }) {
-                Icon(Icons.Default.QrCodeScanner, contentDescription = "Scan")
+            IconButton(onClick = { /* TODO: 实现扫码 */ }) {
+                Icon(Icons.Default.QrCodeScanner, contentDescription = "扫码")
             }
         }
 
         Spacer(modifier = Modifier.height(32.dp))
 
-        // --- 狀態卡片 ---
+        // --- 状态卡片 ---
         Card(
             modifier = Modifier.fillMaxWidth(),
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
             shape = RoundedCornerShape(16.dp)
         ) {
             Column(modifier = Modifier.padding(20.dp)) {
-                Text("CURRENT NODE", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
+                Text("当前节点", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
                     currentNode.tag, 
@@ -84,7 +84,7 @@ fun HomeScreen(viewModel: MainViewModel) {
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     Text(
-                        if (isConnected) "CONNECTED" else "DISCONNECTED",
+                        if (isConnected) "已连接" else "未连接",
                         color = if (isConnected) Color(0xFF4CAF50) else Color.Gray,
                         fontWeight = FontWeight.Bold
                     )
@@ -95,9 +95,9 @@ fun HomeScreen(viewModel: MainViewModel) {
 
         Spacer(modifier = Modifier.weight(1f))
 
-        // --- 連接按鈕 ---
+        // --- 连接按钮 ---
         Box(contentAlignment = Alignment.Center) {
-            // 動態光環
+            // 动态光环
             if (isConnected) {
                 Box(
                     modifier = Modifier
@@ -112,7 +112,7 @@ fun HomeScreen(viewModel: MainViewModel) {
                 )
             }
 
-            // 主按鈕
+            // 主按钮
             Button(
                 onClick = { viewModel.toggleConnection() },
                 modifier = Modifier.size(140.dp),
@@ -124,7 +124,7 @@ fun HomeScreen(viewModel: MainViewModel) {
             ) {
                 Icon(
                     Icons.Default.PowerSettingsNew,
-                    contentDescription = "Connect",
+                    contentDescription = if (isConnected) "断开" else "连接",
                     modifier = Modifier.size(64.dp).scale(1.2f)
                 )
             }
@@ -132,7 +132,7 @@ fun HomeScreen(viewModel: MainViewModel) {
 
         Spacer(modifier = Modifier.weight(1f))
 
-        // --- 日誌預覽 ---
+        // --- 日志预览 ---
         Surface(
             modifier = Modifier
                 .fillMaxWidth()
@@ -142,9 +142,9 @@ fun HomeScreen(viewModel: MainViewModel) {
             border = androidx.compose.foundation.BorderStroke(1.dp, Color.Gray.copy(alpha = 0.2f))
         ) {
             Column(modifier = Modifier.padding(12.dp)) {
-                Text("SYSTEM LOG", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
+                Text("系统日志", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
                 Spacer(modifier = Modifier.height(8.dp))
-                // 顯示最後幾行日誌
+                // 显示最后几行日志
                 logs.takeLast(4).forEach { log ->
                     Text(
                         log, 
