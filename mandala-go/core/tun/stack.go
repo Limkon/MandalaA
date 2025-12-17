@@ -18,7 +18,7 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/udp"
-	"gvisor.dev/gvisor/pkg/waiter" // ✅ 正确路径
+	"gvisor.dev/gvisor/pkg/waiter"
 )
 
 type Stack struct {
