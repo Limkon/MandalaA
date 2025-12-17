@@ -1,7 +1,7 @@
 name: Build Android App
 
 on:
-   workflow_dispatch: # 允许手动触发构建
+  workflow_dispatch: # 仅允许手动触发构建
 
 jobs:
   build:
@@ -38,25 +38,25 @@ jobs:
         working-directory: ./mandala-go
         run: |
           echo "Building Mandala Core..."
-          # 编译 Go 代码生成 .aar 和 .jar
+          # 编译 Go 代码生成 .aar
           # 注意：输出路径直接指向 Android 项目的 libs 目录
           gomobile bind -target=android -o ../android/app/libs/mandala.aar ./mobile
-          
-      # 6. 验证 AAR 是否生成
+
+      # 6. 验证 AAR 是否生成 (用于调试)
       - name: Verify AAR Existence
         run: |
           ls -lh android/app/libs/
-          
-      # 7. 设置 Gradle 执行权限
-      - name: Grant Execute Permission for Gradlew
-        working-directory: ./android
-        run: chmod +x gradlew
 
-      # 8. 构建 Android APK (Debug 版)
-      # 如果需要 Release 版，请配置签名并改用 assembleRelease
+      # 7. 设置 Gradle 环境 (关键：解决没有 gradlew 的问题)
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+        with:
+           gradle-version: '8.5' # 指定一个较新的稳定版本
+
+      # 8. 构建 Android APK (直接使用 gradle 命令)
       - name: Build with Gradle
         working-directory: ./android
-        run: ./gradlew assembleDebug --stacktrace
+        run: gradle assembleDebug --stacktrace
 
       # 9. 上传 APK 产物
       - name: Upload APK
