@@ -22,29 +22,26 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.22'  # 推荐降级到 1.22，gomobile 与 Go 1.23 兼容性较差
+          go-version: '1.22'  # 保持 1.22，更兼容 gomobile
           cache: true
 
-      # 4. 安装 Gomobile 和 Gobind（关键修复）
-      - name: Install Gomobile and Gobind
+      # 4. 安装 Gomobile（关键修复：使用 @latest，避免固定失效的 commit）
+      - name: Install Gomobile
         run: |
-          # 使用一个已知稳定的 gomobile 版本（避免 latest 带来的不稳定）
-          go install golang.org/x/mobile/cmd/gomobile@v0.0.0-20221123193718-2c3d3d9f6e1e
-          go install golang.org/x/mobile/cmd/gobind@v0.0.0-20221123193718-2c3d3d9f6e1e
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          go install golang.org/x/mobile/cmd/gobind@latest  # 可选保险，gomobile 通常会自动处理
           
           # 将 go bin 目录加入 PATH
           echo "$HOME/go/bin" >> $GITHUB_PATH
           
           # 输出版本用于调试
           gomobile version
-          gobind -h
 
       # 5. （可选）运行 gomobile init
-      #    注意：在 GitHub Actions 中 init 经常因缺少 NDK/cmake 而失败
-      #    但安装了 gobind 后，很多情况下 bind 也能正常工作，可先尝试不 init
-      - name: Gomobile Init (可选，失败可忽略)
+      #    在 Actions 中常因缺少 NDK/cmake 失败，但 bind 通常仍能工作
+      - name: Gomobile Init (可选，可忽略失败)
         run: |
-          gomobile init || echo "gomobile init failed, but may still work with pre-installed gobind"
+          gomobile init || echo "gomobile init failed (common in CI), proceeding anyway"
 
       # 6. 编译 Go 核心为 AAR
       - name: Build Core AAR
@@ -55,9 +52,7 @@ jobs:
           # 清理并同步依赖
           go mod tidy
           
-          # 使用 gomobile bind 生成 AAR
-          # 已移除 -tags=bind（gomobile 内部处理）
-          # 保留 -androidapi 21
+          # 生成 AAR
           gomobile bind -target=android -androidapi 21 -o ../android/app/libs/mandala.aar ./mobile
 
       # 7. 验证 AAR 是否生成
