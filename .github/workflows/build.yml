@@ -16,6 +16,11 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
+      - name: Install 32-bit libraries for AAPT2
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y lib32z1 lib32ncurses6 lib32stdc++6
+
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
