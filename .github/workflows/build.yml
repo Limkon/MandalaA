@@ -24,24 +24,26 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          # 修复1：使用兼容 gomobile 最新版本的 Go 1.24
+          # 使用兼容 gomobile 最新版本的 Go 1.24
           go-version: '1.24' 
           cache: true # 开启 Go 缓存加速构建
 
-      # 4. 安装 Gomobile 工具链
+      # 4. 安装 Gomobile 工具链 (最终依赖解决)
       - name: Install Gomobile
         run: |
           go install golang.org/x/mobile/cmd/gomobile@latest
           gomobile init
+          # 【修复】显式安装 gomobile/bind 包，强制将依赖源码放入 GOPATH/pkg/mod，
+          # 解决 gobind 找不到 'golang.org/x/mobile/bind' 的问题。
+          go install golang.org/x/mobile/bind@latest
 
-      # 5. 编译 Go 核心为 AAR (最终修复依赖问题)
+      # 5. 编译 Go 核心为 AAR
       - name: Build Core AAR
         working-directory: ./mandala-go
         run: |
           echo "Building Mandala Core..."
           
-          # 【修复】强制模块系统下载和同步所有依赖，确保 gobind 依赖的 bind 包源码存在。
-          # 解决 "unable to import bind" 错误。
+          # 保留 go mod tidy，确保当前模块的依赖正确
           go mod tidy
           
           # 编译 Go 代码生成 .aar
