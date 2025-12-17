@@ -1,6 +1,7 @@
 name: Build Android App
 on:
   workflow_dispatch:
+
 jobs:
   build:
     name: Build Go Core & Android APK
@@ -8,85 +9,69 @@ jobs:
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
+
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '17'
-      - name: Install libraries for AAPT2 (Ubuntu 24.04 ultimate fix)
+
+      - name: Install libraries for AAPT2
         run: |
           sudo dpkg --add-architecture i386
           sudo apt-get update
           sudo apt-get install -y libc6:i386 libstdc++6:i386 lib32z1 zlib1g:i386
+
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.24'
+          go-version: '1.20' # 回退到 1.20 以确保与旧版 gVisor 的最大兼容性
           cache: true
+
       - name: Install Gomobile and Gobind
         run: |
           go install golang.org/x/mobile/cmd/gomobile@latest
           go install golang.org/x/mobile/cmd/gobind@latest
           echo "$HOME/go/bin" >> $GITHUB_PATH
-          gomobile version || echo "gomobile version unknown (normal)"
-      - name: Fix gVisor for gomobile compatibility
-        working-directory: ./mandala-go
-        run: |
-          echo "Fixing gVisor dependency and compatibility issues..."
-          # 清除缓存和 replace
-          go clean -modcache
-          if grep -q "replace gvisor.dev/gvisor" go.mod; then
-            sed -i '/replace gvisor.dev\/gvisor/d' go.mod
-          fi
-          go mod edit -droprequire=gvisor.dev/gvisor 2>/dev/null || true
-          # 使用最新版本（包含所需 API）
-          go get gvisor.dev/gvisor@latest
-          go mod tidy
-          # 关键修复：删除导致 gomobile 包冲突的测试文件（bridge_test.go 使用 package stack）
-          GVISOR_PATH=$(go env GOPATH)/pkg/mod/gvisor.dev/gvisor@*
-          BRIDGE_TEST="$GVISOR_PATH/pkg/tcpip/stack/bridge_test.go"
-          if [ -f "$BRIDGE_TEST" ]; then
-            echo "Removing conflicting bridge_test.go..."
-            rm "$BRIDGE_TEST"
-          else
-            echo "bridge_test.go not found (already fixed or different version)"
-          fi
-          echo "gVisor fixed. Current version:"
-          grep gvisor.dev/gvisor go.mod
+          gomobile version || echo "gomobile version unknown"
+
       - name: Prepare AAR Output Directory
         run: |
           mkdir -p android/app/libs
           rm -f android/app/libs/mandala.aar
-          ls -la android/app/libs/
+
       - name: Build Core AAR
         working-directory: ./mandala-go
+        # [核心修复] 移除了 'go get ...'，防止自动升级破坏 go.mod 锁定
         run: |
           echo "Building Mandala Core..."
           rm -rf vendor
           go mod tidy
-          go get -d golang.org/x/mobile@latest
+          
+          # 直接编译，依赖完全由 go.mod 控制
           gomobile bind -v -target=android -androidapi 21 \
             -o $(pwd)/../android/app/libs/mandala.aar ./mobile
+
       - name: Verify AAR Existence
         run: |
-          echo "=== Contents of libs directory ==="
           ls -lh android/app/libs/
           if [ -f android/app/libs/mandala.aar ]; then
             echo "AAR generated successfully!"
-            file android/app/libs/mandala.aar
-            du -h android/app/libs/mandala.aar
           else
             echo "AAR generation failed"
             exit 1
           fi
+
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v3
         with:
           gradle-version: '8.5'
+
       - name: Build with Gradle
         working-directory: ./android
         run: |
           ./gradlew assembleDebug --stacktrace --info --no-daemon
+
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
