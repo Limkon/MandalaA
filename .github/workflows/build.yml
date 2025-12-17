@@ -25,7 +25,7 @@ jobs:
           go-version: '1.24'
           cache: true
 
-      # 4. 安装 Gomobile 和 Gobind（在模块模式下安装）
+      # 4. 安装 Gomobile 和 Gobind
       - name: Install Gomobile and Gobind
         run: |
           go install golang.org/x/mobile/cmd/gomobile@latest
@@ -34,40 +34,33 @@ jobs:
           # 加入 PATH
           echo "$HOME/go/bin" >> $GITHUB_PATH
           
-          # 调试输出
-          gomobile version
-          which gobind || echo "gobind not found"
-          gobind -h || echo "gobind help unavailable"
+          # 调试输出（version unknown 是正常现象，可忽略）
+          gomobile version || echo "gomobile version unknown (normal in CI)"
+          which gobind
 
-      # 5. （可选）gomobile init
-      - name: Gomobile Init (可选，可忽略失败)
-        run: |
-          gomobile init || echo "gomobile init failed (常见于 CI)，继续尝试 bind"
-
-      # 6. 编译 Go 核心为 AAR（关键：使用 GOPATH 模式 + 安装 bind 包）
+      # 5. 编译 Go 核心为 AAR（模块模式下运行）
       - name: Build Core AAR
         working-directory: ./mandala-go
         run: |
           echo "Building Mandala Core..."
           
-          # 删除 vendor 文件夹（避免 Go 1.22+ 与 gomobile 冲突）
+          # 删除 vendor 文件夹（避免与 gomobile 冲突）
           rm -rf vendor
           
-          # 切换到 GOPATH 模式，仅在此步骤
-          export GO111MODULE=off
+          # 同步依赖
+          go mod tidy
           
-          # 显式安装 bind 包到 GOPATH
-          go get golang.org/x/mobile/bind
+          # 强制拉取 mobile 依赖（仅下载，不构建；确保 bind 包可用）
+          go get -d golang.org/x/mobile@latest
           
-          # 调试：检查 GOPATH 和 bind 包
-          echo "GOPATH: $GOPATH"
-          ls -R $GOPATH/pkg/ | grep bind || echo "bind not visible yet"
-          go list golang.org/x/mobile/bind || echo "bind still not listed, but should be in GOPATH"
+          # 调试：检查 mobile 依赖
+          go list -m golang.org/x/mobile
+          go list golang.org/x/mobile/bind || echo "bind may still work even if not listed directly"
           
-          # 生成 AAR（添加 -v 详细日志）
+          # 生成 AAR（使用 -v 查看详细过程）
           gomobile bind -v -target=android -androidapi 21 -o ../android/app/libs/mandala.aar ./mobile
 
-      # 7. 验证 AAR 是否生成
+      # 6. 验证 AAR 是否生成
       - name: Verify AAR Existence
         run: |
           ls -lh android/app/libs/ || echo "No libs directory"
@@ -78,19 +71,19 @@ jobs:
             echo "AAR generation failed"
           fi
 
-      # 8. 设置 Gradle 环境
+      # 7. 设置 Gradle 环境
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v3
         with:
           gradle-version: '8.5'
 
-      # 9. 构建 Android APK
+      # 8. 构建 Android APK
       - name: Build with Gradle
         working-directory: ./android
         run: |
           ./gradlew assembleDebug --stacktrace --info --no-daemon
 
-      # 10. 上传 APK 产物
+      # 9. 上传 APK 产物
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
