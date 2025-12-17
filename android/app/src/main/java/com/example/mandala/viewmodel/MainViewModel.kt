@@ -1,4 +1,4 @@
-// 文件路徑: android/app/src/main/java/com/example/mandala/viewmodel/MainViewModel.kt
+// 文件路径: android/app/src/main/java/com/example/mandala/viewmodel/MainViewModel.kt
 
 package com.example.mandala.viewmodel
 
@@ -8,9 +8,9 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import mobile.Mobile // 引用 Gomobile 生成的庫
+import mobile.Mobile // 引用 Gomobile 生成的库
 
-// 定義節點數據結構
+// 定义节点数据结构
 data class Node(
     val tag: String,
     val protocol: String, // "mandala", "vless", "trojan"
@@ -23,24 +23,24 @@ data class Node(
 )
 
 class MainViewModel : ViewModel() {
-    // --- UI 狀態流 ---
+    // --- UI 状态流 ---
     private val _isConnected = MutableStateFlow(false)
     val isConnected = _isConnected.asStateFlow()
 
     private val _connectionTime = MutableStateFlow("00:00:00")
     val connectionTime = _connectionTime.asStateFlow()
 
-    // 當前選中的節點
+    // 当前选中的节点
     private val _currentNode = MutableStateFlow(
         Node("HK - Mandala VIP", "mandala", "hk.example.com", 443, password = "your-password", transport = "ws")
     )
     val currentNode = _currentNode.asStateFlow()
 
-    // 日誌流
-    private val _logs = MutableStateFlow(listOf("[System] Ready"))
+    // 日志流 (默认日志改为中文)
+    private val _logs = MutableStateFlow(listOf("[系统] 就绪"))
     val logs = _logs.asStateFlow()
 
-    // 模擬節點列表數據
+    // 模拟节点列表数据
     private val _nodes = MutableStateFlow(listOf(
         Node("HK - Mandala VIP", "mandala", "hk.example.com", 443, transport = "ws"),
         Node("JP - Trojan Fast", "trojan", "jp.example.com", 443),
@@ -61,23 +61,23 @@ class MainViewModel : ViewModel() {
     private fun startProxy() {
         viewModelScope.launch {
             try {
-                addLog("[Core] Preparing config...")
+                addLog("[核心] 正在准备配置...")
                 val configJson = generateConfigJson(_currentNode.value)
                 
-                // 調用 Go 核心啟動函數 (監聽本地 10809)
-                addLog("[Core] Starting service on port 10809...")
+                // 调用 Go 核心启动函数 (监听本地 10809)
+                addLog("[核心] 正在启动服务 (端口 10809)...")
                 val error = Mobile.start(10809, configJson)
 
                 if (error.isEmpty()) {
                     _isConnected.value = true
-                    addLog("[Core] Service started successfully.")
-                    // 這裡可以啟動一個計時器協程來更新 _connectionTime
+                    addLog("[核心] 服务启动成功")
+                    // 这里可以启动一个计时器协程来更新 _connectionTime
                 } else {
-                    addLog("[Error] Start failed: $error")
+                    addLog("[错误] 启动失败: $error")
                     _isConnected.value = false
                 }
             } catch (e: Exception) {
-                addLog("[Exception] ${e.message}")
+                addLog("[异常] ${e.message}")
             }
         }
     }
@@ -85,35 +85,35 @@ class MainViewModel : ViewModel() {
     private fun stopProxy() {
         viewModelScope.launch {
             try {
-                addLog("[Core] Stopping service...")
+                addLog("[核心] 正在停止服务...")
                 Mobile.stop()
                 _isConnected.value = false
-                addLog("[Core] Service stopped.")
+                addLog("[核心] 服务已停止")
             } catch (e: Exception) {
-                addLog("[Exception] Stop failed: ${e.message}")
+                addLog("[异常] 停止失败: ${e.message}")
             }
         }
     }
 
     fun selectNode(node: Node) {
-        // 如果正在運行，先停止
+        // 如果正在运行，先停止
         if (_isConnected.value) {
             stopProxy()
         }
         _currentNode.value = node
-        addLog("[System] Switched to node: ${node.tag}")
+        addLog("[系统] 切换到节点: ${node.tag}")
     }
 
     private fun addLog(msg: String) {
         val currentLogs = _logs.value.toMutableList()
-        if (currentLogs.size > 100) currentLogs.removeAt(0) // 保持日誌長度
+        if (currentLogs.size > 100) currentLogs.removeAt(0) // 保持日志长度
         currentLogs.add(msg)
         _logs.value = currentLogs
     }
 
     // 生成符合 Go 核心要求的 JSON 配置字符串
     private fun generateConfigJson(node: Node): String {
-        // 簡單的手動拼接 JSON，實際項目建議使用 Gson 或 Moshi
+        // 简单的手动拼接 JSON，实际项目建议使用 Gson 或 Moshi
         return """
         {
             "tag": "${node.tag}",
