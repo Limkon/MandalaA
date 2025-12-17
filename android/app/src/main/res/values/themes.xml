@@ -1,0 +1,5 @@
+<resources>
+    <style name="Theme.Mandala" parent="Theme.Material3.DayNight.NoActionBar">
+        <!-- 可选自定义颜色 -->
+    </style>
+</resources>
