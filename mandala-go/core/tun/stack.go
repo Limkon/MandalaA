@@ -132,13 +132,40 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 	}
 	defer remoteConn.Close()
 
-	if s.config.Type == "mandala" {
+	// [修复] 处理多种协议握手
+	var handshakeErr error
+	var handshakePayload []byte
+
+	switch s.config.Type {
+	case "mandala":
 		client := protocol.NewMandalaClient(s.config.Username, s.config.Password)
-		payload, hsErr := client.BuildHandshakePayload(targetIP.String(), int(targetPort))
-		if hsErr != nil {
-			return
-		}
-		if _, wErr := remoteConn.Write(payload); wErr != nil {
+		handshakePayload, handshakeErr = client.BuildHandshakePayload(targetIP.String(), int(targetPort))
+
+	case "trojan":
+		// TODO: 实现 Trojan 协议握手
+		// client := protocol.NewTrojanClient(s.config.Password)
+		// handshakePayload, handshakeErr = client.BuildHandshake(targetIP.String(), int(targetPort))
+		fmt.Println("[Stack] Error: Trojan protocol not fully implemented in Go core yet.")
+		return
+
+	case "vless":
+		// TODO: 实现 VLESS 协议握手
+		// client := protocol.NewVLessClient(s.config.UUID)
+		// handshakePayload, handshakeErr = client.BuildHandshake(targetIP.String(), int(targetPort))
+		fmt.Println("[Stack] Error: VLESS protocol not fully implemented in Go core yet.")
+		return
+
+	default:
+		// "socks" 或 "none" (直连/普通代理) 可能不需要复杂握手，或者由 dialer 处理了
+	}
+
+	if handshakeErr != nil {
+		fmt.Printf("[Stack] Handshake build failed: %v\n", handshakeErr)
+		return
+	}
+
+	if len(handshakePayload) > 0 {
+		if _, wErr := remoteConn.Write(handshakePayload); wErr != nil {
 			return
 		}
 	}
@@ -175,14 +202,14 @@ func (s *Stack) handleUDP(r *udp.ForwarderRequest) {
 	go func() {
 		defer localConn.Close()
 		buf := make([]byte, 4096)
-		
+
 		// [严重修复] 必须使用 for 循环持续读取数据包，否则只会转发第一个包（导致 DNS 失败）
 		for {
 			n, rErr := localConn.Read(buf)
 			if rErr != nil {
 				return
 			}
-			
+
 			// 写入远程连接 (如果远程连接已关闭，Write 会报错并退出循环)
 			if _, wErr := session.RemoteConn.Write(buf[:n]); wErr != nil {
 				return
