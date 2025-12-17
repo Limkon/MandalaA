@@ -17,9 +17,8 @@ const (
 	udpTimeout = 60 * time.Second
 )
 
-// UDPSession 代表一个活跃的 UDP 流
 type UDPSession struct {
-	// [关键] 字段首字母大写，允许外部访问
+	// [关键] 字段公开
 	LocalConn  *gonet.UDPConn
 	RemoteConn net.Conn
 	LastActive time.Time
