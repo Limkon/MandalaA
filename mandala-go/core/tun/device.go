@@ -5,7 +5,7 @@ import (
 	"os"
 	"sync/atomic"
 
-	// [修复] 必须显式引入 tcpip 包，否则报错 undefined: tcpip
+	// [修复] 引入 tcpip 包
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/link/fdbased"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
