@@ -25,8 +25,8 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          # [修正] 升级回 1.24 以支持最新的 gomobile 工具安装
-          # 旧代码的兼容性由 go.mod 中的 replace 指令保证，这里用新编译器没问题
+          # [关键] 必须使用 1.24 以支持最新的 gomobile 工具
+          # Go 1.24 编译器完全兼容旧版代码，所以这是安全的
           go-version: '1.24'
           cache: true
 
@@ -44,12 +44,12 @@ jobs:
 
       - name: Build Core AAR
         working-directory: ./mandala-go
+        # [关键] 移除了 'go get -d ...'，完全依赖 go.mod 的锁定版本
         run: |
           echo "Building Mandala Core..."
           rm -rf vendor
           go mod tidy
           
-          # 注意：这里依然不要加 'go get'，防止破坏版本锁定
           gomobile bind -v -target=android -androidapi 21 \
             -o $(pwd)/../android/app/libs/mandala.aar ./mobile
 
