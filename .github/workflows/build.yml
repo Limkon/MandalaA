@@ -9,67 +9,57 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 1. 检出代码
+      # ... (Steps 1, 2, 3, 4 保持不变，使用 Go 1.24)
       - name: Checkout Repository
         uses: actions/checkout@v4
-
-      # 2. 设置 Java 环境 (用于 Android Gradle)
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '17'
-
-      # 3. 设置 Go 环境 (用于编译核心库)
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          # 使用兼容 gomobile 最新版本的 Go 1.24
           go-version: '1.24' 
-          cache: true # 开启 Go 缓存加速构建
-
-      # 4. 安装 Gomobile 工具链 (恢复到无错误的简洁版本)
+          cache: true
       - name: Install Gomobile
         run: |
           go install golang.org/x/mobile/cmd/gomobile@latest
           gomobile init
 
-      # 5. 编译 Go 核心为 AAR (最终修复：强制使用 Vendor 模式)
+      # 5. 编译 Go 核心为 AAR (最终修复：强制锁定依赖版本 + Vendor 模式)
       - name: Build Core AAR
         working-directory: ./mandala-go
         run: |
           echo "Building Mandala Core..."
           
-          # 【关键修复】强制将 gomobile 模块添加为依赖。
-          go mod edit -require=golang.org/x/mobile@latest
+          # 【关键修复 1】强制将 golang.org/x/mobile 模块固定到稳定版本，防止 CI 自动拉取不兼容的最新版本。
+          # 假设 mandala-go 存在 go.mod，如果不存在，请先创建它。
+          go mod edit -require=golang.org/x/mobile@v0.0.0-20231108233038-35478a0c49da
+          
+          # 【关键修复 2】同步 go.mod/go.sum 并下载依赖。
           go mod tidy
           
-          # 【最终修复】执行 go mod vendor 将所有依赖源码下载到本地 vendor 目录。
-          # 这将解决 gobind 在 CI 环境中找不到依赖源码的问题。
+          # 【关键修复 3】执行 go mod vendor 将所有依赖源码下载到本地 vendor 目录。
           go mod vendor
           
           # 编译 Go 代码生成 .aar
-          # 注意：输出路径直接指向 Android 项目的 libs 目录
-          # 使用 -mod=vendor 强制工具链使用本地 vendor 目录
+          # 使用 -mod=vendor 强制工具链使用本地 vendor 目录来查找依赖
           gomobile bind -target=android -androidapi 21 -mod=vendor -o ../android/app/libs/mandala.aar ./mobile
 
-      # 6. 验证 AAR 是否生成 (用于调试)
+      # 6. 验证 AAR 是否生成
       - name: Verify AAR Existence
         run: |
           ls -lh android/app/libs/
-
-      # 7. 设置 Gradle 环境 (关键：解决没有 gradlew 的问题)
+          
+      # ... (Steps 7, 8, 9 保持不变)
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v3
         with:
-           gradle-version: '8.5' # 指定一个较新的稳定版本
-
-      # 8. 构建 Android APK (直接使用 gradle 命令)
+           gradle-version: '8.5'
       - name: Build with Gradle
         working-directory: ./android
         run: gradle assembleDebug --stacktrace
-
-      # 9. 上传 APK 产物
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
