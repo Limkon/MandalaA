@@ -77,19 +77,19 @@ class MandalaVpnService : VpnService() {
             }
 
             // 获取文件描述符 (File Descriptor)
-            // Go 核心将通过这个 FD 直接读取/写入网络数据包
             val fd = vpnInterface!!.fd
             Log.d("MandalaVpn", "VPN 接口建立成功. fd=$fd")
 
             // --- 步骤 B: 启动 Go 核心 (tun2socks 模式) ---
             Log.d("MandalaVpn", "2. 正在启动 Go 核心...")
             
-            // [修复] Gomobile 将 Go 的 int 映射为 Java 的 long (64位系统上)
-            // 必须显式转换为 Long，否则编译报错
-            val fdLong = fd.toLong()
+            // [关键修复]
+            // Go 'fd int32' -> Java 'int' (直接使用 fd)
+            // Go 'mtu int'   -> Java 'long' (需要转换)
             val mtuLong = VPN_MTU.toLong()
             
-            val err = Mobile.startVpn(fdLong, mtuLong, configJson)
+            // 注意：这里移除了 fd.toLong()，因为 lib.go 中 fd 类型已改为 int32
+            val err = Mobile.startVpn(fd, mtuLong, configJson)
             
             if (err.isNotEmpty()) {
                 Log.e("MandalaVpn", "Go 核心启动失败: $err")
@@ -129,7 +129,6 @@ class MandalaVpnService : VpnService() {
     }
 
     override fun onRevoke() {
-        // 当用户在系统设置里手动断开 VPN 时触发
         stopVpn()
         super.onRevoke()
     }
@@ -157,7 +156,7 @@ class MandalaVpnService : VpnService() {
             .setContentText("安全连接已建立")
             .setSmallIcon(R.mipmap.ic_launcher)
             .setContentIntent(pendingIntent)
-            .setOngoing(true) // 禁止用户侧滑删除
+            .setOngoing(true)
             .build()
     }
 }
