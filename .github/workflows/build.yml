@@ -25,7 +25,9 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.20' # 回退到 1.20 以确保与旧版 gVisor 的最大兼容性
+          # [修正] 升级回 1.24 以支持最新的 gomobile 工具安装
+          # 旧代码的兼容性由 go.mod 中的 replace 指令保证，这里用新编译器没问题
+          go-version: '1.24'
           cache: true
 
       - name: Install Gomobile and Gobind
@@ -42,13 +44,12 @@ jobs:
 
       - name: Build Core AAR
         working-directory: ./mandala-go
-        # [核心修复] 移除了 'go get ...'，防止自动升级破坏 go.mod 锁定
         run: |
           echo "Building Mandala Core..."
           rm -rf vendor
           go mod tidy
           
-          # 直接编译，依赖完全由 go.mod 控制
+          # 注意：这里依然不要加 'go get'，防止破坏版本锁定
           gomobile bind -v -target=android -androidapi 21 \
             -o $(pwd)/../android/app/libs/mandala.aar ./mobile
 
