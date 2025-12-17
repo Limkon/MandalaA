@@ -36,7 +36,7 @@ func StartStack(fd int, mtu int, cfg *config.OutboundConfig) (*Stack, error) {
 		return nil, err
 	}
 
-	// 初始化协议栈
+	// 1. 初始化协议栈 (适配 2023 API)
 	s := stack.New(stack.Options{
 		NetworkProtocols: []stack.NetworkProtocolFactory{
 			ipv4.NewProtocol,
@@ -54,22 +54,18 @@ func StartStack(fd int, mtu int, cfg *config.OutboundConfig) (*Stack, error) {
 		return nil, fmt.Errorf("create nic failed: %v", err)
 	}
 
-	// [修复 1] 路由表适配新 API: 使用 Subnet 而不是 Mask
-	// 创建一个 0.0.0.0/0 的子网
-	subnet, _ := tcpip.NewSubnet(tcpip.AddrFrom4([4]byte{0, 0, 0, 0}), tcpip.MaskFromBytes([]byte{0, 0, 0, 0}))
-	
+	// 2. 路由表 (适配 2023 API: 使用 Mask)
 	s.SetRouteTable([]tcpip.Route{
 		{
-			Destination: subnet, // 新版使用 Destination (类型为 Subnet)
+			Destination: tcpip.Address{}, // 0.0.0.0
+			Mask:        tcpip.Address{}, // /0
 			NIC:         nicID,
 		},
 	})
 
 	s.SetPromiscuousMode(nicID, true)
-
-	// [修复 2] SACK 选项适配
-	// 新版通常默认开启，或者使用具体的 Option 结构
-	// 这里使用通用设置，如果 SetTransportProtocolOption 报错，可直接注释掉，因为现代 gVisor 默认已优化
+	
+	// 3. SACK 选项 (适配 2023 API: bool 类型)
 	s.SetTransportProtocolOption(tcp.ProtocolNumber, tcp.SACKEnabled(true))
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -115,7 +111,6 @@ func (s *Stack) startPacketHandling() {
 
 func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 	id := r.ID()
-	// 注意：新版 gVisor Address 可能需要 .AsSlice() 或直接使用
 	targetIP := net.IP(id.LocalAddress.AsSlice())
 	targetPort := id.LocalPort
 	
@@ -127,7 +122,6 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 	}
 	r.Complete(false)
 
-	// 将 Endpoint 转为 net.Conn
 	localConn := gonet.NewTCPConn(&wq, ep)
 	defer localConn.Close()
 	
@@ -165,9 +159,8 @@ func (s *Stack) handleUDP(r *udp.ForwarderRequest) {
 		return
 	}
 	
-	// [修复 3] gonet.NewUDPConn 适配新 API
-	// 新版不再需要传入 s.stack 参数
-	localConn := gonet.NewUDPConn(&wq, ep)
+	// 4. UDP 连接 (适配 2023 API: 需要传入 s.stack)
+	localConn := gonet.NewUDPConn(s.stack, &wq, ep)
 
 	session, err := s.nat.GetOrCreate(srcKey, localConn, targetIP, targetPort)
 	if err != nil {
