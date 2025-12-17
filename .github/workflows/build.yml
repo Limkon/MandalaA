@@ -42,9 +42,9 @@ jobs:
           fi
           # 移除旧的 require（如果存在）
           go mod edit -droprequire=gvisor.dev/gvisor 2>/dev/null || true
-          # 固定到一个已知与 gomobile bind 兼容的稳定版本
-          # commit f870d21b3cd3 (2024-01-31) 是许多 Android TUN 项目常用的最后一个稳定版本
-          go get gvisor.dev/gvisor@v0.0.0-20240131153354-f870d21b3cd3
+          # 使用一个已知有效的、gomobile 兼容的 gVisor commit（2023 年底，许多项目仍在使用类似版本）
+          # 这个 commit 之前没有引入测试文件包冲突问题，且上游历史未被重写
+          go get gvisor.dev/gvisor@v0.0.0-20231120231842-db3d49b921f9
           go mod tidy
           echo "gVisor pinned successfully. Current version in go.mod:"
           grep gvisor.dev/gvisor go.mod || echo "gVisor not found (will be added during build)"
