@@ -1,16 +1,15 @@
-// 路径: android/app/build.gradle.kts
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
 }
 
 android {
-    namespace = "com.example.mandala" // 必须与您的包名一致
+    namespace = "com.example.mandala" // 必须与 AndroidManifest.xml 和 MainActivity 包名一致
     compileSdk = 34
 
     defaultConfig {
         applicationId = "com.example.mandala"
-        minSdk = 24 // Go mobile 通常建议 21+，Compose 建议 24+
+        minSdk = 24
         targetSdk = 34
         versionCode = 1
         versionName = "1.0"
@@ -48,7 +47,7 @@ android {
 }
 
 dependencies {
-    // 自动加载 libs 目录下的 mandala.aar
+    // 自动加载 libs 目录下的 mandala.aar (Go 编译产物)
     implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("*.aar"))))
 
     // Android 核心库
@@ -56,17 +55,17 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.6.2")
     implementation("androidx.activity:activity-compose:1.8.1")
     
-    // Compose UI 库 (BOM 方式管理版本)
+    // Compose UI 库 (使用 BOM 管理版本)
     implementation(platform("androidx.compose:compose-bom:2023.08.00"))
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-graphics")
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.material3:material3")
     
-    // 扩展图标库 (用于 settings/home icon)
+    // 扩展图标库 (Settings/Home 图标需要)
     implementation("androidx.compose.material:material-icons-extended")
     
-    // Navigation 导航
+    // Navigation 导航组件
     implementation("androidx.navigation:navigation-compose:2.7.5")
     
     // ViewModel
