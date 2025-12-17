@@ -24,7 +24,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          # 【修复 1】将 Go 版本固定到 1.23，以确保与 gomobile 的特定旧版本依赖兼容
+          # 【修复 1】将 Go 版本固定到 1.23，以确保与 gomobile 的稳定版本依赖兼容
           go-version: '1.23' 
           cache: true # 开启 Go 缓存加速构建
 
@@ -34,7 +34,7 @@ jobs:
           go install golang.org/x/mobile/cmd/gomobile@latest
           gomobile init
 
-      # 5. 编译 Go 核心为 AAR (最终修复：锁定依赖版本 + 强制使用 Vendor 模式)
+      # 5. 编译 Go 核心为 AAR (最终修复：Vendor 模式准备，移除不支持的 -mod 标记)
       - name: Build Core AAR
         working-directory: ./mandala-go
         run: |
@@ -47,12 +47,13 @@ jobs:
           go mod tidy
           
           # 【关键修复 4】执行 go mod vendor 将所有依赖源码下载到本地 vendor 目录。
+          # 这一步是解决 gobind 找不到 'bind' 库源码的关键。
           go mod vendor
           
           # 编译 Go 代码生成 .aar
-          # 使用 -mod=vendor 强制工具链使用本地 vendor 目录来查找依赖
+          # 移除不受支持的 -mod=vendor 标志。由于 vendor 目录已存在，工具链应会自动使用。
           # 保留 -androidapi 21 修复，以兼容 NDK
-          gomobile bind -target=android -androidapi 21 -mod=vendor -o ../android/app/libs/mandala.aar ./mobile
+          gomobile bind -target=android -androidapi 21 -o ../android/app/libs/mandala.aar ./mobile
 
       # 6. 验证 AAR 是否生成 (用于调试)
       - name: Verify AAR Existence
