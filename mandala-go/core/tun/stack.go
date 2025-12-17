@@ -36,7 +36,7 @@ func StartStack(fd int, mtu int, cfg *config.OutboundConfig) (*Stack, error) {
 		return nil, err
 	}
 
-	// 1. 初始化 (2023 API)
+	// 1. 初始化协议栈
 	s := stack.New(stack.Options{
 		NetworkProtocols: []stack.NetworkProtocolFactory{
 			ipv4.NewProtocol,
@@ -54,7 +54,7 @@ func StartStack(fd int, mtu int, cfg *config.OutboundConfig) (*Stack, error) {
 		return nil, fmt.Errorf("create nic failed: %v", err)
 	}
 
-	// 2. 路由 (2023 API: 必须使用 Mask)
+	// 2. 路由表 (旧版 API: 使用 Mask)
 	s.SetRouteTable([]tcpip.Route{
 		{
 			Destination: tcpip.Address{}, // 0.0.0.0
@@ -65,7 +65,7 @@ func StartStack(fd int, mtu int, cfg *config.OutboundConfig) (*Stack, error) {
 
 	s.SetPromiscuousMode(nicID, true)
 	
-	// 3. SACK (2023 API: bool)
+	// 3. TCP 选项 (旧版 API: bool)
 	s.SetTransportProtocolOption(tcp.ProtocolNumber, tcp.SACKEnabled(true))
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -157,7 +157,7 @@ func (s *Stack) handleUDP(r *udp.ForwarderRequest) {
 		return
 	}
 	
-	// 2023 API: 需要 stack 参数
+	// 旧版 API: 需要传入 stack 参数
 	localConn := gonet.NewUDPConn(s.stack, &wq, ep)
 
 	session, err := s.nat.GetOrCreate(srcKey, localConn, targetIP, targetPort)
