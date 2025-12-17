@@ -18,7 +18,7 @@ const (
 )
 
 type UDPSession struct {
-	// [关键] 字段公开
+	// [关键] 字段公开 (大写)
 	LocalConn  *gonet.UDPConn
 	RemoteConn net.Conn
 	LastActive time.Time
