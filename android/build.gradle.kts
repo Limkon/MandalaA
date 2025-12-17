@@ -1,82 +1,13 @@
+// 文件路径: android/build.gradle.kts (根项目)
+
+// 根构建文件只定义插件版本，不应用插件 (apply false)
+// 子模块 (app) 会自行应用这些插件
 plugins {
-    id("com.android.application")
-    id("org.jetbrains.kotlin.android")
+    id("com.android.application") version "8.2.0" apply false
+    id("org.jetbrains.kotlin.android") version "1.9.20" apply false
 }
 
-android {
-    namespace = "com.example.mandala"
-    compileSdk = 34
-
-    defaultConfig {
-        applicationId = "com.example.mandala"
-        minSdk = 24
-        targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
-
-        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        vectorDrawables {
-            useSupportLibrary = true
-        }
-    }
-
-    buildTypes {
-        release {
-            isMinifyEnabled = false
-            proguardFiles(
-                getDefaultProguardFile("proguard-android-optimize.txt"),
-                "proguard-rules.pro"
-            )
-        }
-    }
-    compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_1_8
-        targetCompatibility = JavaVersion.VERSION_1_8
-    }
-    kotlinOptions {
-        jvmTarget = "1.8"
-    }
-    buildFeatures {
-        compose = true
-    }
-    composeOptions {
-        kotlinCompilerExtensionVersion = "1.5.4"
-    }
-    packaging {
-        resources {
-            excludes += "/META-INF/{AL2.0,LGPL2.1}"
-        }
-    }
-}
-
-dependencies {
-    // 自动加载 libs 目录下的 mandala.aar (Go 编译产物)
-    implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("*.aar"))))
-
-    // Android 核心库
-    implementation("androidx.core:core-ktx:1.12.0")
-    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.6.2")
-    implementation("androidx.activity:activity-compose:1.8.1")
-
-    // Material Design
-    implementation("com.google.android.material:material:1.11.0")
-
-    // Compose UI 库
-    implementation(platform("androidx.compose:compose-bom:2023.08.00"))
-    implementation("androidx.compose.ui:ui")
-    implementation("androidx.compose.ui:ui-graphics")
-    implementation("androidx.compose.ui:ui-tooling-preview")
-    implementation("androidx.compose.material3:material3")
-
-    // 扩展图标库 (用于更多 Material Icons)
-    implementation("androidx.compose.material:material-icons-extended")
-
-    // Navigation
-    implementation("androidx.navigation:navigation-compose:2.7.5")
-
-    // ViewModel
-    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.6.2")
-
-    // [新增] Gson 用于解析节点配置 JSON
-    implementation("com.google.code.gson:gson:2.10.1")
+// 定义清理任务
+tasks.register("clean", Delete::class) {
+    delete(rootProject.buildDir)
 }
