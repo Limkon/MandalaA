@@ -54,23 +54,20 @@ func StartStack(fd int, mtu int, cfg *config.OutboundConfig) (*Stack, error) {
 		return nil, fmt.Errorf("create nic failed: %v", err)
 	}
 
-	// 2. [核心修复] 路由表适配 (使用 Subnet)
-	// 在 2023 版本中，Route 结构体需要 Destination 为 tcpip.Subnet 类型
-	// 创建一个全零的 Subnet (0.0.0.0/0)
-	subnet, _ := tcpip.NewSubnet(tcpip.Address{}, tcpip.AddressMask{})
+	// 2. [适配新版] 路由表使用 Subnet 而非 Mask
+	// 创建 0.0.0.0/0 子网
+	subnet, _ := tcpip.NewSubnet(tcpip.AddrFrom4([4]byte{0, 0, 0, 0}), tcpip.MaskFromBytes([]byte{0, 0, 0, 0}))
 
 	s.SetRouteTable([]tcpip.Route{
 		{
-			Destination: subnet, // 使用 Subnet
+			Destination: subnet, // 新版 API: 目标是一个子网
 			NIC:         nicID,
 		},
 	})
 
 	s.SetPromiscuousMode(nicID, true)
 	
-	// 3. [修复] 移除 SACK 设置
-	// 这一行在不同版本间变动太大，且默认配置已足够，删除以保证编译通过
-	// s.SetTransportProtocolOption(tcp.ProtocolNumber, tcp.SACKEnabled(true))
+	// 3. [适配新版] 移除过时的 SACK 选项设置，默认即可
 
 	ctx, cancel := context.WithCancel(context.Background())
 	dialer := proxy.NewDialer(cfg)
@@ -100,13 +97,11 @@ func (s *Stack) Close() {
 }
 
 func (s *Stack) startPacketHandling() {
-	// TCP 处理
 	tcpHandler := tcp.NewForwarder(s.stack, 30000, 10, func(r *tcp.ForwarderRequest) {
 		go s.handleTCP(r)
 	})
 	s.stack.SetTransportProtocolHandler(tcp.ProtocolNumber, tcpHandler.HandlePacket)
 
-	// UDP 处理
 	udpHandler := udp.NewForwarder(s.stack, func(r *udp.ForwarderRequest) {
 		s.handleUDP(r)
 	})
@@ -119,6 +114,7 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 	targetPort := id.LocalPort
 	
 	var wq waiter.Queue
+	// [注意] ep 和 err 由 gVisor 返回，err 类型是 tcpip.Error 接口
 	ep, err := r.CreateEndpoint(&wq)
 	if err != nil {
 		r.Complete(true)
@@ -131,17 +127,18 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 	
 	fmt.Printf("[TCP] Connect to %s:%d\n", targetIP, targetPort)
 
-	remoteConn, err := s.dialer.Dial()
-	if err != nil {
+	// [适配新版] 使用新变量名 dialErr，避免与上面的 err (tcpip.Error) 发生类型冲突
+	remoteConn, dialErr := s.dialer.Dial()
+	if dialErr != nil {
 		return
 	}
 	defer remoteConn.Close()
 
 	if s.config.Type == "mandala" {
 		client := protocol.NewMandalaClient(s.config.Username, s.config.Password)
-		payload, err := client.BuildHandshakePayload(targetIP.String(), int(targetPort))
-		if err != nil { return }
-		if _, err := remoteConn.Write(payload); err != nil { return }
+		payload, hsErr := client.BuildHandshakePayload(targetIP.String(), int(targetPort))
+		if hsErr != nil { return }
+		if _, wErr := remoteConn.Write(payload); wErr != nil { return }
 	}
 
 	go io.Copy(remoteConn, localConn)
@@ -163,11 +160,12 @@ func (s *Stack) handleUDP(r *udp.ForwarderRequest) {
 		return
 	}
 	
-	// 适配: 2023 版本 gonet.NewUDPConn 需要 stack 参数
-	localConn := gonet.NewUDPConn(s.stack, &wq, ep)
+	// [适配新版] gonet.NewUDPConn 不再需要 stack 参数
+	localConn := gonet.NewUDPConn(&wq, ep)
 
-	session, err := s.nat.GetOrCreate(srcKey, localConn, targetIP, targetPort)
-	if err != nil {
+	// [适配新版] 使用 natErr 避免与 tcpip.Error 冲突
+	session, natErr := s.nat.GetOrCreate(srcKey, localConn, targetIP, targetPort)
+	if natErr != nil {
 		localConn.Close()
 		return
 	}
@@ -175,8 +173,8 @@ func (s *Stack) handleUDP(r *udp.ForwarderRequest) {
 	go func() {
 		defer localConn.Close()
 		buf := make([]byte, 4096)
-		n, err := localConn.Read(buf)
-		if err != nil { return }
+		n, rErr := localConn.Read(buf)
+		if rErr != nil { return }
 		session.RemoteConn.Write(buf[:n])
 	}()
 }
