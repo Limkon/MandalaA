@@ -29,26 +29,25 @@ jobs:
           go install golang.org/x/mobile/cmd/gobind@latest
           echo "$HOME/go/bin" >> $GITHUB_PATH
           gomobile version || echo "gomobile version unknown (normal)"
-      - name: Update gVisor to latest
+      - name: Pin gVisor to gomobile-compatible version
         working-directory: ./mandala-go
         run: |
-          echo "Updating gVisor to latest version..."
-          # 清除模块缓存，避免残留无效的旧版本
+          echo "Pinning gVisor to a stable, gomobile-compatible version..."
+          # 清除模块缓存，避免残留无效版本
           go clean -modcache
-          # 如果存在 replace 指令，移除它（常见导致 unknown revision 的原因）
+          # 移除可能的 replace 指令（常见导致 unknown revision 的根源）
           if grep -q "replace gvisor.dev/gvisor" go.mod; then
             echo "Found replace directive for gvisor, removing it..."
             sed -i '/replace gvisor.dev\/gvisor/d' go.mod
           fi
-          # 移除可能的旧 require（如果有）
+          # 移除旧的 require（如果存在）
           go mod edit -droprequire=gvisor.dev/gvisor 2>/dev/null || true
-          # 直接拉取当前最新版本（2025年12月17日最新 commit）
-          go get gvisor.dev/gvisor@v0.0.0-20251217000724-515fb9e6bb4d
-          # 再尝试升级到绝对最新（如果有更新）
-          go get -u gvisor.dev/gvisor@latest
+          # 固定到一个已知与 gomobile bind 兼容的稳定版本
+          # commit f870d21b3cd3 (2024-01-31) 是许多 Android TUN 项目常用的最后一个稳定版本
+          go get gvisor.dev/gvisor@v0.0.0-20240131153354-f870d21b3cd3
           go mod tidy
-          echo "gVisor updated successfully. Current version in go.mod:"
-          grep gvisor.dev/gvisor go.mod || echo "gVisor entry not found (will be resolved during build)"
+          echo "gVisor pinned successfully. Current version in go.mod:"
+          grep gvisor.dev/gvisor go.mod || echo "gVisor not found (will be added during build)"
       - name: Prepare AAR Output Directory
         run: |
           mkdir -p android/app/libs
