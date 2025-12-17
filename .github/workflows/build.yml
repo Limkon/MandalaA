@@ -27,20 +27,22 @@ jobs:
           go-version: '1.21'
           cache: true # 开启 Go 缓存加速构建
 
-      # 4. 安装 Gomobile 工具链
+      # 4. 安装 Gomobile 工具链 (已修复 Go 依赖查找问题)
       - name: Install Gomobile
         run: |
           go install golang.org/x/mobile/cmd/gomobile@latest
+          # 【修复】显式获取 gomobile 内部工具所需的 bind 库
+          # 解决 "unable to import bind: no Go package in golang.org/x/mobile/bind" 错误
+          go get golang.org/x/mobile/bind
           gomobile init
 
-      # 5. 编译 Go 核心为 AAR
+      # 5. 编译 Go 核心为 AAR (保留了 -androidapi 21 修复)
       - name: Build Core AAR
         working-directory: ./mandala-go
         run: |
           echo "Building Mandala Core..."
           # 编译 Go 代码生成 .aar
           # 注意：输出路径直接指向 Android 项目的 libs 目录
-          # 【修复】增加 -androidapi 21 以兼容 NDK 版本的最低 API 级别要求
           gomobile bind -target=android -androidapi 21 -o ../android/app/libs/mandala.aar ./mobile
 
       # 6. 验证 AAR 是否生成 (用于调试)
