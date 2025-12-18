@@ -1,7 +1,7 @@
 package tun
 
 import (
-	"fmt"
+	"log" // [修改] 使用 log 替代 fmt
 	"net"
 	"sync"
 	"time"
@@ -42,15 +42,11 @@ func (m *UDPNatManager) GetOrCreate(key string, localConn *gonet.UDPConn, target
 	if val, ok := m.sessions.Load(key); ok {
 		session := val.(*UDPSession)
 
-		// [关键修复] 检查 gVisor 的本地连接句柄是否发生了变化
-		// 如果 localConn 不相等，说明旧的 endpoint 已经销毁，旧的 session.LocalConn 指向了无效资源。
-		// 此时旧的 copyRemoteToLocal 协程可能已经退出或正在报错。
-		// 最安全的做法是：关闭旧的远程连接，强制重新建立会话。
 		if session.LocalConn != localConn {
-			// fmt.Printf("[NAT] Session stale for %s, recreating...\n", key)
+			log.Printf("[NAT] Session stale for %s, recreating...", key)
 			session.RemoteConn.Close()
 			m.sessions.Delete(key)
-			// 继续向下执行，创建新会话
+			// 继续创建新会话
 		} else {
 			session.LastActive = time.Now()
 			return session, nil
@@ -63,7 +59,6 @@ func (m *UDPNatManager) GetOrCreate(key string, localConn *gonet.UDPConn, target
 	}
 
 	// [协议适配] 发送 UDP 握手包
-	// 目前仅演示 Mandala 协议，VLESS/Trojan UDP 需要封装 Packet，后续请补充
 	if m.config.Type == "mandala" {
 		client := protocol.NewMandalaClient(m.config.Username, m.config.Password)
 		payload, err := client.BuildHandshakePayload(targetIP, targetPort)
@@ -86,7 +81,7 @@ func (m *UDPNatManager) GetOrCreate(key string, localConn *gonet.UDPConn, target
 	m.sessions.Store(key, session)
 	go m.copyRemoteToLocal(key, session)
 
-	fmt.Printf("[NAT] New UDP Session: %s\n", key)
+	log.Printf("[NAT] New UDP Session: %s", key)
 	return session, nil
 }
 
@@ -101,12 +96,14 @@ func (m *UDPNatManager) copyRemoteToLocal(key string, s *UDPSession) {
 		s.RemoteConn.SetReadDeadline(time.Now().Add(udpTimeout))
 		n, err := s.RemoteConn.Read(buf)
 		if err != nil {
+			// log.Printf("[NAT] Remote read error/timeout: %v", err)
 			return
 		}
 
 		s.LastActive = time.Now()
-		// 如果 s.LocalConn 已经失效（例如 gVisor 关闭了 endpoint），这里会报错并退出
+		
 		if _, err := s.LocalConn.Write(buf[:n]); err != nil {
+			log.Printf("[NAT] Write to Local Stack failed: %v", err)
 			return
 		}
 	}
@@ -119,6 +116,7 @@ func (m *UDPNatManager) cleanupLoop() {
 		m.sessions.Range(func(key, value interface{}) bool {
 			session := value.(*UDPSession)
 			if now.Sub(session.LastActive) > udpTimeout {
+				// log.Printf("[NAT] Session timeout: %s", key)
 				session.RemoteConn.Close()
 				m.sessions.Delete(key)
 			}
