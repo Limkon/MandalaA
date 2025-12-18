@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"time" // [必须引入]
+	"time"
 
 	"mandala/core/config"
 	"mandala/core/protocol"
@@ -35,14 +35,14 @@ type Stack struct {
 }
 
 func StartStack(fd int, mtu int, cfg *config.OutboundConfig) (*Stack, error) {
-	fmt.Println("DEBUG: Build Version 2025-Fixed-DNS-CN")
+	// [验证标记] 请在 Logcat 搜索 "MANDALA_DEBUG" 确认这行日志存在
+	fmt.Println("MANDALA_DEBUG: Core Version 2025-TCP-DNS-Fix-v2 Starting...")
 
 	dev, err := NewDevice(fd, uint32(mtu))
 	if err != nil {
 		return nil, err
 	}
 
-	// 1. 初始化协议栈
 	s := stack.New(stack.Options{
 		NetworkProtocols: []stack.NetworkProtocolFactory{
 			ipv4.NewProtocol,
@@ -60,7 +60,6 @@ func StartStack(fd int, mtu int, cfg *config.OutboundConfig) (*Stack, error) {
 		return nil, fmt.Errorf("create nic failed: %v", err)
 	}
 
-	// 2. 路由表设置
 	s.SetRouteTable([]tcpip.Route{
 		{
 			Destination: header.IPv4EmptySubnet, 
@@ -110,6 +109,12 @@ func (s *Stack) startPacketHandling() {
 }
 
 func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Printf("MANDALA_DEBUG: TCP Panic recovered: %v\n", r)
+		}
+	}()
+
 	id := r.ID()
 	targetIP := net.IP(id.LocalAddress.AsSlice())
 	targetPort := id.LocalPort
@@ -125,8 +130,12 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 	localConn := gonet.NewTCPConn(&wq, ep)
 	defer localConn.Close()
 
+	// 打印 TCP 连接尝试
+	// fmt.Printf("MANDALA_DEBUG: TCP Connect %s:%d\n", targetIP, targetPort)
+
 	remoteConn, dialErr := s.dialer.Dial()
 	if dialErr != nil {
+		fmt.Printf("MANDALA_DEBUG: Proxy Dial Failed: %v\n", dialErr)
 		return
 	}
 	defer remoteConn.Close()
@@ -156,21 +165,23 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 }
 
 func (s *Stack) handleUDP(r *udp.ForwarderRequest) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Printf("MANDALA_DEBUG: UDP Panic recovered: %v\n", r)
+		}
+	}()
+
 	id := r.ID()
 	targetPort := int(id.LocalPort)
 
-	// [关键修复] 拦截 DNS 请求 (Port 53)
-	// 直接在本地处理 DNS，绕过代理服务器，解决 UDP 转发不兼容导致的断网问题
+	// [拦截 DNS]
 	if targetPort == 53 {
 		var wq waiter.Queue
 		ep, err := r.CreateEndpoint(&wq)
 		if err != nil {
 			return
 		}
-		// 创建本地 VPN 内的 UDP 连接
 		localConn := gonet.NewUDPConn(s.stack, &wq, ep)
-		
-		// 启动协程处理 DNS 转发
 		go s.handleLocalDNS(localConn)
 		return
 	}
@@ -186,7 +197,6 @@ func (s *Stack) handleUDP(r *udp.ForwarderRequest) {
 		return
 	}
 
-	// [重要] 3个参数，适配您锁定的旧版 gVisor
 	localConn := gonet.NewUDPConn(s.stack, &wq, ep)
 
 	session, natErr := s.nat.GetOrCreate(srcKey, localConn, targetIP, targetPort)
@@ -211,45 +221,64 @@ func (s *Stack) handleUDP(r *udp.ForwarderRequest) {
 	}()
 }
 
-// [新增] 本地 DNS 转发逻辑 (适配国内网络)
-// 这里的流量会因为 Android 侧的 addDisallowedApplication 而直接走物理 Wi-Fi/5G
+// [增强版] 使用 TCP 协议请求国内 DNS
+// 更加稳定，穿透性更好，解决 UDP 丢包问题
 func (s *Stack) handleLocalDNS(conn *gonet.UDPConn) {
 	defer conn.Close()
 	
-	// 设置内部读取超时，防止协程泄露
+	// 读取 Android 发来的 DNS 请求 (UDP)
 	conn.SetDeadline(time.Now().Add(5 * time.Second))
-
-	buf := make([]byte, 1500) // 标准 MTU 大小
+	buf := make([]byte, 1500)
 	n, err := conn.Read(buf)
 	if err != nil {
 		return
 	}
 
-	// [修改] 使用国内 DNS (阿里 DNS) 以适应大陆网络
-	// 避免使用 8.8.8.8 被墙导致的超时
+	// 打印日志，确认 DNS 请求到了这里
+	// fmt.Println("MANDALA_DEBUG: DNS Request Intercepted, forwarding via TCP...")
+
+	// 使用 TCP 连接阿里 DNS (223.5.5.5:53)
+	// TCP DNS 在网络环境恶劣时比 UDP 更可靠
 	realDNS := "223.5.5.5:53"
 	
-	// 设置外部连接超时
-	dnsConn, err := net.DialTimeout("udp", realDNS, 2*time.Second)
+	tcpConn, err := net.DialTimeout("tcp", realDNS, 3*time.Second)
 	if err != nil {
-		fmt.Printf("[DNS] Local dial to %s failed: %v\n", realDNS, err)
+		fmt.Printf("MANDALA_DEBUG: DNS Dial TCP failed: %v\n", err)
 		return
 	}
-	defer dnsConn.Close()
+	defer tcpConn.Close()
 
-	// 发送查询
-	if _, err := dnsConn.Write(buf[:n]); err != nil {
+	// DNS over TCP 需要在包头增加 2 字节长度
+	// 格式: [Length(2)][DNS Payload]
+	reqData := make([]byte, 2+n)
+	reqData[0] = byte(n >> 8)
+	reqData[1] = byte(n)
+	copy(reqData[2:], buf[:n])
+
+	if _, err := tcpConn.Write(reqData); err != nil {
+		fmt.Printf("MANDALA_DEBUG: DNS Write TCP failed: %v\n", err)
 		return
 	}
 
-	// 读取回复
-	dnsConn.SetReadDeadline(time.Now().Add(2 * time.Second))
-	n, err = dnsConn.Read(buf)
-	if err != nil {
-		fmt.Printf("[DNS] Read from real DNS failed: %v\n", err)
+	// 读取响应
+	tcpConn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	
+	// 先读 2 字节长度
+	lenBuf := make([]byte, 2)
+	if _, err := io.ReadFull(tcpConn, lenBuf); err != nil {
+		fmt.Printf("MANDALA_DEBUG: DNS Read Len failed: %v\n", err)
+		return
+	}
+	respLen := int(lenBuf[0])<<8 | int(lenBuf[1])
+
+	// 再读 Payload
+	respBuf := make([]byte, respLen)
+	if _, err := io.ReadFull(tcpConn, respBuf); err != nil {
+		fmt.Printf("MANDALA_DEBUG: DNS Read Payload failed: %v\n", err)
 		return
 	}
 
-	// 将结果写回 VPN 内部
-	conn.Write(buf[:n])
+	// 成功获取 IP，写回给 VPN (UDP)
+	// fmt.Printf("MANDALA_DEBUG: DNS Resolved! Length: %d\n", respLen)
+	conn.Write(respBuf)
 }
