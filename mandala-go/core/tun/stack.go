@@ -15,7 +15,7 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
-	"gvisor.dev/gvisor/pkg/tcpip/link/sniffer" // 保持引入嗅探器
+	"gvisor.dev/gvisor/pkg/tcpip/link/sniffer" // 保留嗅探器用于调试
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv6"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
@@ -49,8 +49,7 @@ func StartStack(fd int, mtu int, cfg *config.OutboundConfig) (*Stack, error) {
 		return nil, err
 	}
 
-	// [关键配置] 创建网络栈
-	// [修改] 移除了不支持的 HandleLocalError 字段
+	// [修复] 移除了不支持的 HandleLocalError 字段
 	s := stack.New(stack.Options{
 		NetworkProtocols: []stack.NetworkProtocolFactory{
 			ipv4.NewProtocol,
