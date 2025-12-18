@@ -20,7 +20,6 @@ class MandalaVpnService : VpnService() {
         const val ACTION_START = "com.example.mandala.service.START"
         const val ACTION_STOP = "com.example.mandala.service.STOP"
         const val EXTRA_CONFIG = "config_json"
-        
         private const val VPN_ADDRESS = "172.16.0.1"
         private const val VPN_MTU = 1500
         private const val CHANNEL_ID = "MandalaVpnChannel"
@@ -34,45 +33,29 @@ class MandalaVpnService : VpnService() {
             stopVpn()
             return START_NOT_STICKY
         }
-
         startForeground(NOTIFICATION_ID, createNotification())
-        val configJson = intent?.getStringExtra(EXTRA_CONFIG) ?: "{}"
-        startVpn(configJson)
-
+        intent?.getStringExtra(EXTRA_CONFIG)?.let { startVpn(it) }
         return START_STICKY
     }
 
     private fun startVpn(configJson: String) {
         if (vpnInterface != null) return
-
         try {
             val builder = Builder()
                 .setSession("Mandala")
                 .addAddress(VPN_ADDRESS, 24)
-                .addRoute("0.0.0.0", 0)  // IPv4 全局路由
-                .addRoute("::", 0)       // [關鍵修復] IPv6 全局路由
+                .addRoute("0.0.0.0", 0) // IPv4
+                .addRoute("::", 0)      // IPv6 
                 .setMtu(VPN_MTU)
                 .addDnsServer("8.8.8.8")
-
-            // 排除自身，防止流量死循環
-            try {
-                builder.addDisallowedApplication(packageName)
-            } catch (e: Exception) {
-                Log.e("MandalaVpn", "Exclude app failed", e)
-            }
+                .addDisallowedApplication(packageName)
 
             vpnInterface = builder.establish()
-            
             vpnInterface?.let {
-                val err = Mobile.startVpn(it.fd.toInt(), VPN_MTU, configJson)
-                if (err.isNotEmpty()) {
-                    Log.e("MandalaVpn", "Go Core Error: $err")
-                    stopVpn()
-                }
+                val err = Mobile.startVpn(it.fd, VPN_MTU, configJson)
+                if (err.isNotEmpty()) stopVpn()
             }
-        } catch (e: Exception) {
-            stopVpn()
-        }
+        } catch (e: Exception) { stopVpn() }
     }
 
     private fun stopVpn() {
@@ -83,24 +66,16 @@ class MandalaVpnService : VpnService() {
         stopSelf()
     }
 
-    override fun onDestroy() {
-        stopVpn()
-        super.onDestroy()
-    }
+    override fun onDestroy() { stopVpn(); super.onDestroy() }
 
     private fun createNotification(): Notification {
         val manager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(CHANNEL_ID, "VPN Status", NotificationManager.IMPORTANCE_LOW)
-            manager.createNotificationChannel(channel)
+            manager.createNotificationChannel(NotificationChannel(CHANNEL_ID, "VPN", NotificationManager.IMPORTANCE_LOW))
         }
-        val intent = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
+        val pi = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("Mandala VPN")
-            .setContentText("服務運行中")
-            .setSmallIcon(R.mipmap.ic_launcher)
-            .setContentIntent(intent)
-            .setOngoing(true)
-            .build()
+            .setContentTitle("Mandala VPN").setSmallIcon(R.mipmap.ic_launcher)
+            .setContentIntent(pi).setOngoing(true).build()
     }
 }
