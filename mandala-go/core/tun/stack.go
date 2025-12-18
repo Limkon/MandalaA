@@ -68,7 +68,7 @@ func StartStack(fd int, mtu int, cfg *config.OutboundConfig) (*Stack, error) {
 		return nil, fmt.Errorf("create nic failed: %v", err)
 	}
 
-	// [關鍵修復] 同時添加 IPv4 和 IPv6 默認路由
+	// 补全 IPv4 和 IPv6 路由
 	s.SetRouteTable([]tcpip.Route{
 		{Destination: header.IPv4EmptySubnet, NIC: nicID},
 		{Destination: header.IPv6EmptySubnet, NIC: nicID},
@@ -77,12 +77,13 @@ func StartStack(fd int, mtu int, cfg *config.OutboundConfig) (*Stack, error) {
 	s.SetPromiscuousMode(nicID, true)
 
 	ctx, cancel := context.WithCancel(context.Background())
+	dialer := proxy.NewDialer(cfg)
 	tStack := &Stack{
 		stack:  s,
 		device: dev,
-		dialer: proxy.NewDialer(cfg),
+		dialer: dialer,
 		config: cfg,
-		nat:    NewUDPNatManager(proxy.NewDialer(cfg), cfg),
+		nat:    NewUDPNatManager(dialer, cfg),
 		ctx:    ctx,
 		cancel: cancel,
 	}
@@ -127,7 +128,6 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 	}
 	defer remoteConn.Close()
 
-	// [協議握手邏輯]
 	var payload []byte
 	var hErr error
 	targetHost := id.LocalAddress.String()
@@ -162,7 +162,84 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 }
 
 func (s *Stack) handleUDP(r *udp.ForwarderRequest) {
-	// ... UDP 處理邏輯保持不變 (見之前上傳的文件) ...
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("UDP Panic: %v", r)
+		}
+	}()
+
+	id := r.ID()
+	targetPort := int(id.LocalPort)
+    
+	if targetPort == 53 {
+		var wq waiter.Queue
+		ep, err := r.CreateEndpoint(&wq)
+		if err != nil {
+			return
+		}
+		localConn := gonet.NewUDPConn(s.stack, &wq, ep)
+		go s.handleLocalDNS(localConn)
+		return
+	}
+
+	targetIP := net.IP(id.LocalAddress.AsSlice()).String()
+	srcKey := fmt.Sprintf("%s:%d->%s:%d", id.RemoteAddress.String(), id.RemotePort, targetIP, targetPort)
+
+	var wq waiter.Queue
+	ep, err := r.CreateEndpoint(&wq)
+	if err != nil {
+		return
+	}
+
+	localConn := gonet.NewUDPConn(s.stack, &wq, ep)
+	session, natErr := s.nat.GetOrCreate(srcKey, localConn, targetIP, targetPort)
+	if natErr != nil {
+		localConn.Close()
+		return
+	}
+
+	go func() {
+		defer localConn.Close()
+		buf := make([]byte, 4096)
+		for {
+			localConn.SetDeadline(time.Now().Add(60 * time.Second))
+			n, rErr := localConn.Read(buf)
+			if rErr != nil {
+				return
+			}
+			session.RemoteConn.Write(buf[:n])
+		}
+	}()
+}
+
+func (s *Stack) handleLocalDNS(conn *gonet.UDPConn) {
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(5 * time.Second))
+	buf := make([]byte, 1500)
+	n, err := conn.Read(buf)
+	if err != nil {
+		return
+	}
+
+	realDNS := "223.5.5.5:53"
+	tcpConn, err := net.DialTimeout("tcp", realDNS, 3*time.Second)
+	if err != nil {
+		return
+	}
+	defer tcpConn.Close()
+
+	reqData := make([]byte, 2+n)
+	reqData[0] = byte(n >> 8)
+	reqData[1] = byte(n)
+	copy(reqData[2:], buf[:n])
+
+	tcpConn.Write(reqData)
+	lenBuf := make([]byte, 2)
+	io.ReadFull(tcpConn, lenBuf)
+	respLen := int(lenBuf[0])<<8 | int(lenBuf[1])
+	respBuf := make([]byte, respLen)
+	io.ReadFull(tcpConn, respBuf)
+	conn.Write(respBuf)
 }
 
 func (s *Stack) Close() {
