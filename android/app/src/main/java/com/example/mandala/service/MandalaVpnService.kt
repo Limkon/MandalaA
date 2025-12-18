@@ -67,6 +67,14 @@ class MandalaVpnService : VpnService() {
                 .addDnsServer("8.8.8.8") 
                 .addDnsServer("1.1.1.1")
 
+            // [关键修复] 排除本应用自身的流量，防止死循环！
+            // 这样 Go 核心发出的代理请求会直接走物理网络（WiFi/4G），而不是重新进入 VPN
+            try {
+                builder.addDisallowedApplication(packageName)
+            } catch (e: Exception) {
+                Log.e("MandalaVpn", "排除应用失败", e)
+            }
+
             // 只有应用在前台或拥有 VPN 权限时才能调用
             vpnInterface = builder.establish()
 
