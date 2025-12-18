@@ -1,6 +1,7 @@
 package tun
 
 import (
+	"log" // 用於調試日誌
 	"net"
 	"strings"
 	"sync"
@@ -40,6 +41,7 @@ func (m *UDPNatManager) GetOrCreate(key string, localConn *gonet.UDPConn, target
 	if val, ok := m.sessions.Load(key); ok {
 		session := val.(*UDPSession)
 		if session.LocalConn != localConn {
+			log.Printf("GoLog: [NAT] Session stale for %s", key)
 			session.RemoteConn.Close()
 			m.sessions.Delete(key)
 		} else {
@@ -71,7 +73,10 @@ func (m *UDPNatManager) GetOrCreate(key string, localConn *gonet.UDPConn, target
 	}
 
 	if len(payload) > 0 {
-		remoteConn.Write(payload)
+		if _, err := remoteConn.Write(payload); err != nil {
+			remoteConn.Close()
+			return nil, err
+		}
 	}
 
 	session := &UDPSession{
@@ -82,6 +87,7 @@ func (m *UDPNatManager) GetOrCreate(key string, localConn *gonet.UDPConn, target
 
 	m.sessions.Store(key, session)
 	go m.copyRemoteToLocal(key, session)
+	log.Printf("GoLog: [NAT] Created UDP session for %s", key)
 	return session, nil
 }
 
@@ -96,7 +102,7 @@ func (m *UDPNatManager) copyRemoteToLocal(key string, s *UDPSession) {
 		n, err := s.RemoteConn.Read(buf)
 		if err != nil { return }
 		s.LastActive = time.Now()
-		s.LocalConn.Write(buf[:n])
+		if _, err := s.LocalConn.Write(buf[:n]); err != nil { return }
 	}
 }
 
