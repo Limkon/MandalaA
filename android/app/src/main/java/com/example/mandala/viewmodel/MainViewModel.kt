@@ -17,6 +17,8 @@ data class Node(
     val password: String = "",
     val uuid: String = "",
     val transport: String = "tcp",
+    val path: String = "/",    // 补全路径
+    val sni: String = "",      // 补全 SNI
     val isSelected: Boolean = false
 )
 
@@ -26,10 +28,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _isConnected = MutableStateFlow(false)
     val isConnected = _isConnected.asStateFlow()
 
+    private val _logs = MutableStateFlow(listOf("[系统] 就绪"))
+    val logs = _logs.asStateFlow()
+
     private val _nodes = MutableStateFlow<List<Node>>(emptyList())
     val nodes = _nodes.asStateFlow()
 
-    private val _currentNode = MutableStateFlow(Node("未選擇", "none", "0.0.0.0", 0))
+    private val _currentNode = MutableStateFlow(Node("未选择", "none", "0.0.0.0", 0))
     val currentNode = _currentNode.asStateFlow()
 
     sealed class VpnEvent {
@@ -40,11 +45,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val vpnEvent = _vpnEventChannel.receiveAsFlow()
 
     init {
+        loadData()
+        _isConnected.value = Mobile.isRunning()
+    }
+
+    private fun loadData() {
         viewModelScope.launch {
-            val saved = repository.loadNodes()
-            _nodes.value = saved
-            if (saved.isNotEmpty()) _currentNode.value = saved[0]
-            _isConnected.value = Mobile.isRunning()
+            val savedNodes = repository.loadNodes()
+            _nodes.value = savedNodes
+            if (savedNodes.isNotEmpty()) _currentNode.value = savedNodes[0]
         }
     }
 
@@ -53,24 +62,38 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             if (_isConnected.value) {
                 _vpnEventChannel.send(VpnEvent.StopVpn)
                 _isConnected.value = false
+                addLog("[系统] 正在停止...")
             } else {
-                if (_currentNode.value.protocol != "none") {
-                    val json = generateConfigJson(_currentNode.value)
-                    _vpnEventChannel.send(VpnEvent.StartVpn(json))
-                    _isConnected.value = true
+                if (_currentNode.value.protocol == "none") {
+                    addLog("[错误] 请选择节点")
+                    return@launch
                 }
+                val config = generateConfigJson(_currentNode.value)
+                _vpnEventChannel.send(VpnEvent.StartVpn(config))
+                addLog("[系统] 建立连接中...")
             }
         }
     }
 
+    fun onVpnStarted() { _isConnected.value = true; addLog("[核心] 已连接") }
+    fun onVpnStopped() { _isConnected.value = false; addLog("[核心] 已断开") }
+
     fun selectNode(node: Node) {
+        if (_isConnected.value) toggleConnection()
         _currentNode.value = node
+        addLog("[系统] 切换: ${node.tag}")
     }
 
-    // [關鍵修復] 動態生成配置 JSON
+    private fun addLog(msg: String) {
+        val current = _logs.value.toMutableList()
+        if (current.size > 100) current.removeAt(0)
+        current.add(msg)
+        _logs.value = current
+    }
+
     private fun generateConfigJson(node: Node): String {
-        // 判斷是否需要啟用 TLS (一般 Trojan/Vless 默認開啟)
         val useTls = node.protocol != "socks" && node.protocol != "shadowsocks"
+        val sniValue = if (node.sni.isEmpty()) node.server else node.sni
         
         return """
         {
@@ -82,12 +105,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             "uuid": "${node.uuid}",
             "tls": { 
                 "enabled": $useTls, 
-                "server_name": "${node.server}",
+                "server_name": "$sniValue",
                 "insecure": true 
             },
             "transport": { 
                 "type": "${node.transport}", 
-                "path": "/" 
+                "path": "${node.path}" 
             }
         }
         """.trimIndent()
