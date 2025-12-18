@@ -42,17 +42,13 @@ android {
         kotlinCompilerExtensionVersion = "1.5.4"
     }
     
-    // [修复 1] 配置打包选项以防止 NDK 缺失导致的 Strip 错误
+    // NDK Strip 配置 (保持这个，防止 NDK 错误)
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
         jniLibs {
-            // 使用旧版打包方式以提高兼容性
             useLegacyPackaging = true
-            
-            // 跳过 Strip 步骤，保留调试符号
-            // 解决 "Unable to strip library" 或 "NDK not configured" 错误
             keepDebugSymbols += setOf(
                 "*/armeabi-v7a/*.so",
                 "*/arm64-v8a/*.so",
@@ -64,10 +60,10 @@ android {
 }
 
 dependencies {
-    // 自动加载 libs 目录下的 mandala.aar (Go 编译产物)
+    // 自动加载 libs 目录下的 mandala.aar
     implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("*.aar"))))
 
-    // [修复 2] 添加 Gson 依赖 (解决 NodeParser.kt 编译错误)
+    // [关键修复] 添加 Gson 依赖
     implementation("com.google.code.gson:gson:2.10.1")
 
     // Android 核心库
@@ -78,14 +74,14 @@ dependencies {
     // Google Material 库
     implementation("com.google.android.material:material:1.11.0")
 
-    // Compose UI 库 (使用 BOM 管理版本)
+    // Compose UI 库
     implementation(platform("androidx.compose:compose-bom:2023.08.00"))
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-graphics")
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.material3:material3")
   
-    // 扩展图标库 (Settings/Home 图标需要)
+    // 扩展图标库
     implementation("androidx.compose.material:material-icons-extended")
     
     // Navigation 导航组件
