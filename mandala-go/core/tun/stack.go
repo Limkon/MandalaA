@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log" // [关键] 必须使用 log 包，不能只用 fmt
+	"log"
 	"net"
 	"time"
 
@@ -15,6 +15,7 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
+	"gvisor.dev/gvisor/pkg/tcpip/link/sniffer" // [新增] 引入嗅探器
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv6"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
@@ -40,7 +41,6 @@ type Stack struct {
 }
 
 func StartStack(fd int, mtu int, cfg *config.OutboundConfig) (*Stack, error) {
-	// [调试日志] 启动入口
 	log.Printf("=== Go Core Starting (FD: %d, MTU: %d) ===", fd, mtu)
 
 	dev, err := NewDevice(fd, uint32(mtu))
@@ -49,6 +49,7 @@ func StartStack(fd int, mtu int, cfg *config.OutboundConfig) (*Stack, error) {
 		return nil, err
 	}
 
+	// [关键配置] 创建网络栈
 	s := stack.New(stack.Options{
 		NetworkProtocols: []stack.NetworkProtocolFactory{
 			ipv4.NewProtocol,
@@ -58,10 +59,25 @@ func StartStack(fd int, mtu int, cfg *config.OutboundConfig) (*Stack, error) {
 			tcp.NewProtocol,
 			udp.NewProtocol,
 		},
+		// [调试] 处理本地 ICMP 错误等
+		HandleLocalError: func(err error) {
+			log.Printf("Local Stack Error: %v", err)
+		},
 	})
 
 	nicID := tcpip.NICID(1)
-	if err := s.CreateNIC(nicID, dev.LinkEndpoint()); err != nil {
+	
+	// [关键修改] 使用 Sniffer 包装 endpoint
+	// 这将在 Logcat 中打印所有进出的数据包信息，用于诊断为什么“没反应”
+	// LogPackets: true 会打印包头，LogBadPackets: true 会打印损坏的包
+	rawEndpoint := dev.LinkEndpoint()
+	sniffedEndpoint := sniffer.New(rawEndpoint)
+	
+	// 启用详细日志输出到标准输出 (Logcat)
+	// 注意：如果数据量过大导致卡顿，生产环境需关闭
+	log.Println("GoLog: Packet Sniffer Enabled on NIC 1")
+
+	if err := s.CreateNIC(nicID, sniffedEndpoint); err != nil {
 		dev.Close()
 		log.Printf("Error creating NIC: %v", err)
 		return nil, fmt.Errorf("create nic failed: %v", err)
@@ -74,6 +90,7 @@ func StartStack(fd int, mtu int, cfg *config.OutboundConfig) (*Stack, error) {
 		},
 	})
 
+	// 开启混杂模式，确保能接收所有包
 	s.SetPromiscuousMode(nicID, true)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -119,7 +136,6 @@ func (s *Stack) startPacketHandling() {
 }
 
 func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
-	// 捕获 panic 防止崩坏
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("TCP Panic: %v", r)
@@ -127,9 +143,7 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 	}()
 
 	id := r.ID()
-	// [调试日志] 打印所有 TCP 请求的目标
-	// 如果你看到大量指向你自己代理服务器 IP 的请求，说明还是死循环
-	log.Printf("TCP Connect: %s:%d", id.LocalAddress, id.LocalPort)
+	log.Printf("TCP Request: %s:%d -> %s:%d", id.RemoteAddress, id.RemotePort, id.LocalAddress, id.LocalPort)
 
 	var wq waiter.Queue
 	ep, err := r.CreateEndpoint(&wq)
@@ -143,14 +157,15 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 	localConn := gonet.NewTCPConn(&wq, ep)
 	defer localConn.Close()
 
+	// 连接代理服务器
 	remoteConn, dialErr := s.dialer.Dial()
 	if dialErr != nil {
-		log.Printf("Proxy Dial Failed: %v", dialErr)
+		log.Printf("TCP Proxy Dial Failed: %v", dialErr)
 		return
 	}
 	defer remoteConn.Close()
 
-	// ... 握手逻辑 (保持不变) ...
+	// 握手逻辑
 	var handshakeErr error
 	var handshakePayload []byte
 
@@ -167,10 +182,12 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 
 	if len(handshakePayload) > 0 {
 		if _, wErr := remoteConn.Write(handshakePayload); wErr != nil {
+			log.Printf("Handshake Write Failed: %v", wErr)
 			return
 		}
 	}
 
+	// 双向转发
 	go io.Copy(remoteConn, localConn)
 	io.Copy(localConn, remoteConn)
 }
@@ -184,10 +201,13 @@ func (s *Stack) handleUDP(r *udp.ForwarderRequest) {
 
 	id := r.ID()
 	targetPort := int(id.LocalPort)
+    
+    // 增加日志：证明 UDP 包到达了 Handler
+    // log.Printf("UDP Packet: %s:%d -> %s:%d", id.RemoteAddress, id.RemotePort, id.LocalAddress, id.LocalPort)
 
-	// [调试日志] 确认 DNS 请求是否到达
+	// [DNS 劫持]
 	if targetPort == 53 {
-		log.Println("UDP/53 DNS Request Intercepted! Handling locally...")
+		log.Println("UDP/53 DNS Request Intercepted")
 		var wq waiter.Queue
 		ep, err := r.CreateEndpoint(&wq)
 		if err != nil {
@@ -199,7 +219,7 @@ func (s *Stack) handleUDP(r *udp.ForwarderRequest) {
 		return
 	}
 
-	// ... 普通 UDP NAT 逻辑 ...
+	// [常规 UDP NAT]
 	targetIP := net.IP(id.LocalAddress.AsSlice()).String()
 	srcKey := fmt.Sprintf("%s:%d->%s:%d",
 		id.RemoteAddress.String(), id.RemotePort,
@@ -208,12 +228,14 @@ func (s *Stack) handleUDP(r *udp.ForwarderRequest) {
 	var wq waiter.Queue
 	ep, err := r.CreateEndpoint(&wq)
 	if err != nil {
+		log.Printf("UDP CreateEndpoint error: %v", err)
 		return
 	}
 
 	localConn := gonet.NewUDPConn(s.stack, &wq, ep)
 	session, natErr := s.nat.GetOrCreate(srcKey, localConn, targetIP, targetPort)
 	if natErr != nil {
+		log.Printf("UDP NAT Error: %v", natErr)
 		localConn.Close()
 		return
 	}
@@ -222,6 +244,8 @@ func (s *Stack) handleUDP(r *udp.ForwarderRequest) {
 		defer localConn.Close()
 		buf := make([]byte, 4096)
 		for {
+			// 设置超时，防止死锁
+			localConn.SetDeadline(time.Now().Add(60 * time.Second))
 			n, rErr := localConn.Read(buf)
 			if rErr != nil {
 				return
@@ -245,10 +269,13 @@ func (s *Stack) handleLocalDNS(conn *gonet.UDPConn) {
 		return
 	}
 
+	// 使用 Log 直接打印，确保能看见
+	// log.Printf("Processing DNS Query, len=%d", n)
+
 	// 阿里 DNS
 	realDNS := "223.5.5.5:53"
 	
-	log.Printf("Dialing DNS (TCP) to %s...", realDNS)
+	// 这里使用 net.DialTimeout 会走 Android 系统网络 (因为加了 disallowedApplication)
 	tcpConn, err := net.DialTimeout("tcp", realDNS, 3*time.Second)
 	if err != nil {
 		log.Printf("DNS Dial TCP failed: %v", err)
