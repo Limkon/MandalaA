@@ -15,7 +15,7 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
-	"gvisor.dev/gvisor/pkg/tcpip/link/sniffer" // [新增] 引入嗅探器
+	"gvisor.dev/gvisor/pkg/tcpip/link/sniffer" // 保持引入嗅探器
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv6"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
@@ -50,6 +50,7 @@ func StartStack(fd int, mtu int, cfg *config.OutboundConfig) (*Stack, error) {
 	}
 
 	// [关键配置] 创建网络栈
+	// [修改] 移除了不支持的 HandleLocalError 字段
 	s := stack.New(stack.Options{
 		NetworkProtocols: []stack.NetworkProtocolFactory{
 			ipv4.NewProtocol,
@@ -59,22 +60,16 @@ func StartStack(fd int, mtu int, cfg *config.OutboundConfig) (*Stack, error) {
 			tcp.NewProtocol,
 			udp.NewProtocol,
 		},
-		// [调试] 处理本地 ICMP 错误等
-		HandleLocalError: func(err error) {
-			log.Printf("Local Stack Error: %v", err)
-		},
 	})
 
 	nicID := tcpip.NICID(1)
 	
-	// [关键修改] 使用 Sniffer 包装 endpoint
-	// 这将在 Logcat 中打印所有进出的数据包信息，用于诊断为什么“没反应”
-	// LogPackets: true 会打印包头，LogBadPackets: true 会打印损坏的包
+	// [关键调试] 使用 Sniffer 包装 endpoint
+	// 这将在 Logcat 中打印所有进出的数据包信息
 	rawEndpoint := dev.LinkEndpoint()
 	sniffedEndpoint := sniffer.New(rawEndpoint)
 	
 	// 启用详细日志输出到标准输出 (Logcat)
-	// 注意：如果数据量过大导致卡顿，生产环境需关闭
 	log.Println("GoLog: Packet Sniffer Enabled on NIC 1")
 
 	if err := s.CreateNIC(nicID, sniffedEndpoint); err != nil {
@@ -202,9 +197,6 @@ func (s *Stack) handleUDP(r *udp.ForwarderRequest) {
 	id := r.ID()
 	targetPort := int(id.LocalPort)
     
-    // 增加日志：证明 UDP 包到达了 Handler
-    // log.Printf("UDP Packet: %s:%d -> %s:%d", id.RemoteAddress, id.RemotePort, id.LocalAddress, id.LocalPort)
-
 	// [DNS 劫持]
 	if targetPort == 53 {
 		log.Println("UDP/53 DNS Request Intercepted")
@@ -269,13 +261,9 @@ func (s *Stack) handleLocalDNS(conn *gonet.UDPConn) {
 		return
 	}
 
-	// 使用 Log 直接打印，确保能看见
-	// log.Printf("Processing DNS Query, len=%d", n)
-
 	// 阿里 DNS
 	realDNS := "223.5.5.5:53"
 	
-	// 这里使用 net.DialTimeout 会走 Android 系统网络 (因为加了 disallowedApplication)
 	tcpConn, err := net.DialTimeout("tcp", realDNS, 3*time.Second)
 	if err != nil {
 		log.Printf("DNS Dial TCP failed: %v", err)
