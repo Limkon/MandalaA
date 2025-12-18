@@ -105,7 +105,9 @@ func (s *Stack) startPacketHandling() {
 
 func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 	defer func() {
-		if r := recover(); r != nil { log.Printf("TCP Panic: %v", r) }
+		if err := recover(); err != nil {
+			log.Printf("TCP Panic: %v", err)
+		}
 	}()
 
 	id := r.ID()
@@ -160,7 +162,9 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 
 func (s *Stack) handleUDP(r *udp.ForwarderRequest) {
 	defer func() {
-		if r := recover(); r != nil { log.Printf("UDP Panic: %v", r) }
+		if err := recover(); err != nil {
+			log.Printf("UDP Panic: %v", err)
+		}
 	}()
 
 	id := r.ID()
