@@ -1,7 +1,6 @@
 package tun
 
 import (
-	"log"
 	"net"
 	"strings"
 	"sync"
