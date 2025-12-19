@@ -2,12 +2,12 @@ package com.example.mandala.ui.profiles
 
 import android.content.ClipboardManager
 import android.content.Context
+import android.widget.Toast
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material3.*
@@ -33,16 +33,17 @@ fun ProfilesScreen(viewModel: MainViewModel) {
             TopAppBar(
                 title = { Text("配置文件管理") },
                 actions = {
-                    // 從剪貼板導入按鈕
                     IconButton(onClick = {
                         val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                         val clipData = clipboard.primaryClip
                         if (clipData != null && clipData.itemCount > 0) {
                             val clipboardText = clipData.getItemAt(0).text.toString()
-                            // 調用 MainViewModel 中重構後的導入方法
-                            viewModel.importFromText(clipboardText)
+                            // 調用 ViewModel 進行導入
+                            viewModel.importFromText(clipboardText) { success, message ->
+                                Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+                            }
                         } else {
-                            viewModel.addLog("[系統] 剪貼板為空")
+                            Toast.makeText(context, "剪貼簿是空的", Toast.LENGTH_SHORT).show()
                         }
                     }) {
                         Icon(Icons.Default.ContentPaste, contentDescription = "從剪貼板導入")
@@ -52,20 +53,11 @@ fun ProfilesScreen(viewModel: MainViewModel) {
         }
     ) { padding ->
         if (nodes.isEmpty()) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(padding),
-                contentAlignment = Alignment.Center
-            ) {
-                Text("尚未添加任何節點，請點擊上方按鈕導入", style = MaterialTheme.typography.bodyLarge)
+            Box(modifier = Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) {
+                Text("尚未添加任何節點，請點擊右上方圖標導入")
             }
         } else {
-            LazyColumn(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(padding)
-            ) {
+            LazyColumn(modifier = Modifier.fillMaxSize().padding(padding)) {
                 items(nodes) { node ->
                     NodeItem(
                         node = node,
@@ -79,51 +71,18 @@ fun ProfilesScreen(viewModel: MainViewModel) {
 }
 
 @Composable
-fun NodeItem(
-    node: Node,
-    isSelected: Boolean,
-    onSelect: () -> Unit
-) {
+fun NodeItem(node: Node, isSelected: Boolean, onSelect: () -> Unit) {
     Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 8.dp)
-            .clickable { onSelect() },
-        colors = CardDefaults.cardColors(
-            containerColor = if (isSelected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant
-        )
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp).clickable { onSelect() },
+        colors = CardDefaults.cardColors(containerColor = if (isSelected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant)
     ) {
-        Row(
-            modifier = Modifier
-                .padding(16.dp)
-                .fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
+        Row(modifier = Modifier.padding(16.dp).fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = node.tag,
-                    style = MaterialTheme.typography.titleMedium,
-                    color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    text = "${node.protocol.uppercase()} | ${node.server}:${node.port}",
-                    style = MaterialTheme.typography.bodySmall
-                )
-                if (node.path != "/") {
-                    Text(
-                        text = "路徑: ${node.path}",
-                        style = MaterialTheme.typography.labelSmall
-                    )
-                }
+                Text(text = node.tag, style = MaterialTheme.typography.titleMedium)
+                Text(text = "${node.protocol.uppercase()} | ${node.server}:${node.port}", style = MaterialTheme.typography.bodySmall)
             }
             if (isSelected) {
-                Icon(
-                    imageVector = Icons.Default.Check,
-                    contentDescription = "已選擇",
-                    tint = MaterialTheme.colorScheme.primary
-                )
+                Icon(Icons.Default.Check, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
             }
         }
     }
