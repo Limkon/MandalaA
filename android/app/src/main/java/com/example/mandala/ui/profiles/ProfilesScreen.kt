@@ -31,22 +31,21 @@ fun ProfilesScreen(viewModel: MainViewModel) {
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("配置文件管理") },
+                title = { Text("节点管理") },
                 actions = {
                     IconButton(onClick = {
                         val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                         val clipData = clipboard.primaryClip
                         if (clipData != null && clipData.itemCount > 0) {
-                            val clipboardText = clipData.getItemAt(0).text.toString()
-                            // 調用 ViewModel 進行導入
-                            viewModel.importFromText(clipboardText) { success, message ->
+                            val text = clipData.getItemAt(0).text.toString()
+                            viewModel.importFromText(text) { success, message ->
                                 Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
                             }
                         } else {
-                            Toast.makeText(context, "剪貼簿是空的", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(context, "剪贴板为空", Toast.LENGTH_SHORT).show()
                         }
                     }) {
-                        Icon(Icons.Default.ContentPaste, contentDescription = "從剪貼板導入")
+                        Icon(Icons.Default.ContentPaste, contentDescription = "粘贴导入")
                     }
                 }
             )
@@ -54,7 +53,7 @@ fun ProfilesScreen(viewModel: MainViewModel) {
     ) { padding ->
         if (nodes.isEmpty()) {
             Box(modifier = Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) {
-                Text("尚未添加任何節點，請點擊右上方圖標導入")
+                Text("暂无节点，请从剪贴板导入")
             }
         } else {
             LazyColumn(modifier = Modifier.fillMaxSize().padding(padding)) {
@@ -74,7 +73,9 @@ fun ProfilesScreen(viewModel: MainViewModel) {
 fun NodeItem(node: Node, isSelected: Boolean, onSelect: () -> Unit) {
     Card(
         modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp).clickable { onSelect() },
-        colors = CardDefaults.cardColors(containerColor = if (isSelected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant)
+        colors = CardDefaults.cardColors(
+            containerColor = if (isSelected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant
+        )
     ) {
         Row(modifier = Modifier.padding(16.dp).fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Column(modifier = Modifier.weight(1f)) {
