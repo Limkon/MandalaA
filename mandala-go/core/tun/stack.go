@@ -58,11 +58,10 @@ func StartStack(fd int, mtu int, cfg *config.OutboundConfig) (*Stack, error) {
 		},
 	})
 
-	// [關鍵修復] 開啟 IP 轉發功能
-	// 在 VPN 模式下，gVisor 扮演路由器的角色。如果不開啟轉發，
-	// 所有目的地不是 172.16.0.1 的回程數據包都會被丟棄。
-	s.SetForwardingDefaultAndVerify(ipv4.ProtocolNumber, true)
-	s.SetForwardingDefaultAndVerify(ipv6.ProtocolNumber, true)
+	// [關鍵修正] 使用正確的 gVisor 方法名稱開啟 IP 轉發
+	// 修正 SetForwardingDefaultAndVerify 為 SetForwardingDefault
+	s.SetForwardingDefault(ipv4.ProtocolNumber, true)
+	s.SetForwardingDefault(ipv6.ProtocolNumber, true)
 
 	nicID := tcpip.NICID(1)
 	if err := s.CreateNIC(nicID, sniffer.New(dev.LinkEndpoint())); err != nil {
