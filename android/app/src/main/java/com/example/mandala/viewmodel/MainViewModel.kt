@@ -10,7 +10,6 @@ import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import mobile.Mobile
 
-// 节点数据模型
 data class Node(
     val tag: String,
     val protocol: String,
@@ -39,7 +38,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _currentNode = MutableStateFlow(Node("未选择", "none", "0.0.0.0", 0))
     val currentNode = _currentNode.asStateFlow()
 
-    // VPN 事件通道，用于通知 Service
     sealed class VpnEvent {
         data class StartVpn(val configJson: String) : VpnEvent()
         object StopVpn : VpnEvent()
@@ -66,14 +64,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             if (_isConnected.value) {
                 _vpnEventChannel.send(VpnEvent.StopVpn)
-                addLog("[系统] 正在请求停止服务...")
+                addLog("[系统] 正在断开连接...")
             } else {
                 if (_currentNode.value.protocol != "none") {
                     val json = generateConfigJson(_currentNode.value)
                     _vpnEventChannel.send(VpnEvent.StartVpn(json))
-                    addLog("[系统] 正在发起连接: ${_currentNode.value.tag}")
-                } else {
-                    addLog("[系统] 请先选择一个有效节点")
+                    addLog("[系统] 正在连接: ${_currentNode.value.tag}")
                 }
             }
         }
@@ -81,41 +77,38 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun selectNode(node: Node) {
         _currentNode.value = node
-        addLog("[系统] 切换到节点: ${node.tag}")
+        addLog("[系统] 已选择: ${node.tag}")
     }
 
-    // VPN 启动成功回调
+    // 核心接口修复
     fun onVpnStarted() {
         _isConnected.value = true
-        addLog("[核心] VPN 隧道已建立")
+        addLog("[核心] 已连通网络")
     }
 
-    // VPN 停止回调
     fun onVpnStopped() {
         _isConnected.value = false
-        addLog("[核心] VPN 隧道已关闭")
+        addLog("[核心] 连接已关闭")
     }
 
-    // 从文本导入节点
+    // 导入接口修复
     fun importFromText(text: String, onResult: (Boolean, String) -> Unit) {
         val node = NodeParser.parse(text)
         if (node != null) {
             viewModelScope.launch {
-                val currentList = _nodes.value.toMutableList()
-                // 检查重复
-                if (currentList.any { it.server == node.server && it.port == node.port }) {
-                    onResult(false, "该节点已存在")
+                val current = _nodes.value.toMutableList()
+                if (current.any { it.server == node.server && it.port == node.port }) {
+                    onResult(false, "节点已存在")
                     return@launch
                 }
-                currentList.add(node)
-                repository.saveNodes(currentList)
+                current.add(node)
+                repository.saveNodes(current)
                 refreshNodes()
-                addLog("[系统] 成功导入节点: ${node.tag}")
+                addLog("[系统] 导入成功: ${node.tag}")
                 onResult(true, "导入成功")
             }
         } else {
-            addLog("[错误] 不支持的链接格式")
-            onResult(false, "导入失败：链接格式无效")
+            onResult(false, "无效的链接格式")
         }
     }
 
@@ -126,11 +119,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _logs.value = current
     }
 
-    // 动态生成 Go 核心所需的 JSON 配置
     private fun generateConfigJson(node: Node): String {
         val useTls = node.protocol != "socks" && node.protocol != "shadowsocks"
-        val sniValue = if (node.sni.isEmpty()) node.server else node.sni
-        
         return """
         {
             "tag": "${node.tag}",
@@ -139,15 +129,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             "server_port": ${node.port},
             "password": "${node.password}",
             "uuid": "${node.uuid}",
-            "tls": { 
-                "enabled": $useTls, 
-                "server_name": "$sniValue",
-                "insecure": true 
-            },
-            "transport": { 
-                "type": "${node.transport}", 
-                "path": "${node.path}" 
-            }
+            "tls": { "enabled": $useTls, "server_name": "${if(node.sni.isEmpty()) node.server else node.sni}" },
+            "transport": { "type": "${node.transport}", "path": "${node.path}" }
         }
         """.trimIndent()
     }
