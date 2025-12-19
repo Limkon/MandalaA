@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net"      // 用於 handleUDP 邏輯
+	"net"
 	"strings"
-	"time"     // 用於超時處理
+	"time"
 
 	"mandala/core/config"
 	"mandala/core/protocol"
@@ -40,7 +40,7 @@ type Stack struct {
 }
 
 func StartStack(fd int, mtu int, cfg *config.OutboundConfig) (*Stack, error) {
-	log.Printf("=== Go核心启动 (文件描述符: %d, MTU: %d) ===", fd, mtu)
+	log.Printf("=== Go核心啟動 (文件描述符: %d, MTU: %d) ===", fd, mtu)
 
 	dev, err := NewDevice(fd, uint32(mtu))
 	if err != nil {
@@ -58,10 +58,16 @@ func StartStack(fd int, mtu int, cfg *config.OutboundConfig) (*Stack, error) {
 		},
 	})
 
+	// [關鍵修復] 開啟 IP 轉發功能
+	// 在 VPN 模式下，gVisor 扮演路由器的角色。如果不開啟轉發，
+	// 所有目的地不是 172.16.0.1 的回程數據包都會被丟棄。
+	s.SetForwardingDefaultAndVerify(ipv4.ProtocolNumber, true)
+	s.SetForwardingDefaultAndVerify(ipv6.ProtocolNumber, true)
+
 	nicID := tcpip.NICID(1)
 	if err := s.CreateNIC(nicID, sniffer.New(dev.LinkEndpoint())); err != nil {
 		dev.Close()
-		return nil, fmt.Errorf("创建网卡失败: %v", err)
+		return nil, fmt.Errorf("創建網卡失敗: %v", err)
 	}
 
 	s.SetRouteTable([]tcpip.Route{
@@ -102,27 +108,22 @@ func (s *Stack) startPacketHandling() {
 func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 	defer func() {
 		if err := recover(); err != nil {
-			log.Printf("TCP恐慌恢复: %v", err)
+			log.Printf("TCP恐慌恢復: %v", err)
 		}
 	}()
 
 	id := r.ID()
-	var wq waiter.Queue
-	ep, err := r.CreateEndpoint(&wq)
-	if err != nil {
-		r.Complete(true)
-		return
-	}
-
+	
+	// 1. 撥號遠端伺服器
 	remoteConn, dialErr := s.dialer.Dial()
 	if dialErr != nil {
-		log.Printf("TCP拨号失败 (%s:%d): %v", id.LocalAddress, id.LocalPort, dialErr)
+		log.Printf("TCP撥號失敗 (%s:%d): %v", id.LocalAddress, id.LocalPort, dialErr)
 		r.Complete(true)
-		ep.Close()
 		return
 	}
 	defer remoteConn.Close()
 
+	// 2. 構造並發送協議握手包
 	var payload []byte
 	var hErr error
 	targetHost := id.LocalAddress.String()
@@ -139,27 +140,50 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 	}
 
 	if hErr != nil {
-		log.Printf("协议握手包构造失败: %v", hErr)
+		log.Printf("協議握手包構造失敗: %v", hErr)
 		r.Complete(true)
 		return
 	}
 
 	if len(payload) > 0 {
-		remoteConn.Write(payload)
+		if _, err := remoteConn.Write(payload); err != nil {
+			log.Printf("寫入握手包失敗: %v", err)
+			r.Complete(true)
+			return
+		}
 	}
 
+	// 3. 接受本地連接並建立 gonet.TCPConn
+	var wq waiter.Queue
+	ep, err := r.CreateEndpoint(&wq)
+	if err != nil {
+		r.Complete(true)
+		return
+	}
 	r.Complete(false)
+
 	localConn := gonet.NewTCPConn(&wq, ep)
 	defer localConn.Close()
 
-	go io.Copy(remoteConn, localConn)
-	io.Copy(localConn, remoteConn)
+	// 4. 雙向轉發數據流
+	errChan := make(chan error, 2)
+	go func() {
+		_, err := io.Copy(remoteConn, localConn)
+		errChan <- err
+	}()
+	go func() {
+		_, err := io.Copy(localConn, remoteConn)
+		errChan <- err
+	}()
+
+	// 等待任意一端關閉
+	<-errChan
 }
 
 func (s *Stack) handleUDP(r *udp.ForwarderRequest) {
 	defer func() {
 		if err := recover(); err != nil {
-			log.Printf("UDP恐慌恢复: %v", err)
+			log.Printf("UDP恐慌恢復: %v", err)
 		}
 	}()
 
@@ -175,7 +199,7 @@ func (s *Stack) handleUDP(r *udp.ForwarderRequest) {
 		return
 	}
 
-	targetIP := net.IP(id.LocalAddress.AsSlice()).String() // 确保 net 包被使用
+	targetIP := net.IP(id.LocalAddress.AsSlice()).String()
 	srcKey := fmt.Sprintf("%s:%d->%s:%d", id.RemoteAddress.String(), id.RemotePort, targetIP, targetPort)
 
 	var wq waiter.Queue
@@ -185,7 +209,7 @@ func (s *Stack) handleUDP(r *udp.ForwarderRequest) {
 	localConn := gonet.NewUDPConn(s.stack, &wq, ep)
 	session, natErr := s.nat.GetOrCreate(srcKey, localConn, targetIP, targetPort)
 	if natErr != nil {
-		log.Printf("UDP NAT会话创建失败: %v", natErr)
+		log.Printf("UDP NAT會話創建失敗: %v", natErr)
 		localConn.Close()
 		return
 	}
@@ -194,7 +218,6 @@ func (s *Stack) handleUDP(r *udp.ForwarderRequest) {
 		defer localConn.Close()
 		buf := make([]byte, 4096)
 		for {
-			// 确保 time 包被使用
 			localConn.SetDeadline(time.Now().Add(60 * time.Second))
 			n, rErr := localConn.Read(buf)
 			if rErr != nil { return }
@@ -235,5 +258,5 @@ func (s *Stack) Close() {
 	s.cancel()
 	if s.device != nil { s.device.Close() }
 	if s.stack != nil { s.stack.Close() }
-	log.Println("Go核心栈已关闭")
+	log.Println("Go核心棧已關閉")
 }
