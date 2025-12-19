@@ -58,10 +58,10 @@ func StartStack(fd int, mtu int, cfg *config.OutboundConfig) (*Stack, error) {
 		},
 	})
 
-	// [關鍵修正] 使用正確的 gVisor 方法名稱開啟 IP 轉發
-	// 修正 SetForwardingDefaultAndVerify 為 SetForwardingDefault
-	s.SetForwardingDefault(ipv4.ProtocolNumber, true)
-	s.SetForwardingDefault(ipv6.ProtocolNumber, true)
+	// [關鍵修復] 使用該版本正確的 API 名稱開啟 IP 轉發
+	// gVisor 在 2023 年將 SetForwardingDefault 重命名為 SetForwardingDefaultAndAllNICs
+	s.SetForwardingDefaultAndAllNICs(ipv4.ProtocolNumber, true)
+	s.SetForwardingDefaultAndAllNICs(ipv6.ProtocolNumber, true)
 
 	nicID := tcpip.NICID(1)
 	if err := s.CreateNIC(nicID, sniffer.New(dev.LinkEndpoint())); err != nil {
@@ -107,7 +107,7 @@ func (s *Stack) startPacketHandling() {
 func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 	defer func() {
 		if err := recover(); err != nil {
-			log.Printf("TCP恐慌恢復: %v", err)
+			log.Printf("TCP處理異常: %v", err)
 		}
 	}()
 
@@ -139,20 +139,19 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 	}
 
 	if hErr != nil {
-		log.Printf("協議握手包構造失敗: %v", hErr)
+		log.Printf("握手包構造失敗: %v", hErr)
 		r.Complete(true)
 		return
 	}
 
 	if len(payload) > 0 {
 		if _, err := remoteConn.Write(payload); err != nil {
-			log.Printf("寫入握手包失敗: %v", err)
 			r.Complete(true)
 			return
 		}
 	}
 
-	// 3. 接受本地連接並建立 gonet.TCPConn
+	// 3. 接受本地連接
 	var wq waiter.Queue
 	ep, err := r.CreateEndpoint(&wq)
 	if err != nil {
@@ -164,7 +163,7 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 	localConn := gonet.NewTCPConn(&wq, ep)
 	defer localConn.Close()
 
-	// 4. 雙向轉發數據流
+	// 4. 雙向轉發
 	errChan := make(chan error, 2)
 	go func() {
 		_, err := io.Copy(remoteConn, localConn)
@@ -175,14 +174,13 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 		errChan <- err
 	}()
 
-	// 等待任意一端關閉
 	<-errChan
 }
 
 func (s *Stack) handleUDP(r *udp.ForwarderRequest) {
 	defer func() {
 		if err := recover(); err != nil {
-			log.Printf("UDP恐慌恢復: %v", err)
+			log.Printf("UDP處理異常: %v", err)
 		}
 	}()
 
@@ -208,7 +206,6 @@ func (s *Stack) handleUDP(r *udp.ForwarderRequest) {
 	localConn := gonet.NewUDPConn(s.stack, &wq, ep)
 	session, natErr := s.nat.GetOrCreate(srcKey, localConn, targetIP, targetPort)
 	if natErr != nil {
-		log.Printf("UDP NAT會話創建失敗: %v", natErr)
 		localConn.Close()
 		return
 	}
@@ -257,5 +254,4 @@ func (s *Stack) Close() {
 	s.cancel()
 	if s.device != nil { s.device.Close() }
 	if s.stack != nil { s.stack.Close() }
-	log.Println("Go核心棧已關閉")
 }
