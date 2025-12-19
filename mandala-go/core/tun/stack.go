@@ -26,7 +26,8 @@ import (
 )
 
 func init() {
-	log.SetPrefix("Go日志: ")
+	// 统一日志前缀，方便 Logcat 过滤 "GoLog"
+	log.SetPrefix("GoLog: ")
 }
 
 type Stack struct {
@@ -40,7 +41,7 @@ type Stack struct {
 }
 
 func StartStack(fd int, mtu int, cfg *config.OutboundConfig) (*Stack, error) {
-	log.Printf("=== Go核心啟動 (文件描述符: %d, MTU: %d) ===", fd, mtu)
+	log.Printf("[Stack] 启动中 (FD: %d, MTU: %d, Type: %s)", fd, mtu, cfg.Type)
 
 	dev, err := NewDevice(fd, uint32(mtu))
 	if err != nil {
@@ -58,15 +59,15 @@ func StartStack(fd int, mtu int, cfg *config.OutboundConfig) (*Stack, error) {
 		},
 	})
 
-	// [關鍵修復] 使用該版本正確的 API 名稱開啟 IP 轉發
-	// gVisor 在 2023 年將 SetForwardingDefault 重命名為 SetForwardingDefaultAndAllNICs
+	// 开启 IP 转发
 	s.SetForwardingDefaultAndAllNICs(ipv4.ProtocolNumber, true)
 	s.SetForwardingDefaultAndAllNICs(ipv6.ProtocolNumber, true)
 
 	nicID := tcpip.NICID(1)
+	// 使用 Sniffer 包装 endpoint，方便内部调试，也可以直接用 dev.LinkEndpoint()
 	if err := s.CreateNIC(nicID, sniffer.New(dev.LinkEndpoint())); err != nil {
 		dev.Close()
-		return nil, fmt.Errorf("創建網卡失敗: %v", err)
+		return nil, fmt.Errorf("创建网卡失败: %v", err)
 	}
 
 	s.SetRouteTable([]tcpip.Route{
@@ -74,6 +75,7 @@ func StartStack(fd int, mtu int, cfg *config.OutboundConfig) (*Stack, error) {
 		{Destination: header.IPv6EmptySubnet, NIC: nicID},
 	})
 
+	// 设置混杂模式，确保能接收所有包
 	s.SetPromiscuousMode(nicID, true)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -93,11 +95,13 @@ func StartStack(fd int, mtu int, cfg *config.OutboundConfig) (*Stack, error) {
 }
 
 func (s *Stack) startPacketHandling() {
+	// TCP 处理程序
 	tcpHandler := tcp.NewForwarder(s.stack, 30000, 10, func(r *tcp.ForwarderRequest) {
 		go s.handleTCP(r)
 	})
 	s.stack.SetTransportProtocolHandler(tcp.ProtocolNumber, tcpHandler.HandlePacket)
 
+	// UDP 处理程序
 	udpHandler := udp.NewForwarder(s.stack, func(r *udp.ForwarderRequest) {
 		s.handleUDP(r)
 	})
@@ -107,22 +111,24 @@ func (s *Stack) startPacketHandling() {
 func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 	defer func() {
 		if err := recover(); err != nil {
-			log.Printf("TCP處理異常: %v", err)
+			log.Printf("[TCP] Panic recovered: %v", err)
 		}
 	}()
 
 	id := r.ID()
+	// 如果需要极详细的日志，可以解开下面这行，但会刷屏
+	// log.Printf("[TCP] New Req: %s:%d -> %s:%d", id.RemoteAddress, id.RemotePort, id.LocalAddress, id.LocalPort)
 	
-	// 1. 撥號遠端伺服器
+	// 1. 尝试拨号远程代理服务器
 	remoteConn, dialErr := s.dialer.Dial()
 	if dialErr != nil {
-		log.Printf("TCP撥號失敗 (%s:%d): %v", id.LocalAddress, id.LocalPort, dialErr)
-		r.Complete(true)
+		log.Printf("[TCP] Dial remote failed (%s): %v", id.LocalAddress, dialErr)
+		r.Complete(true) // 发送 RST 拒绝连接
 		return
 	}
 	defer remoteConn.Close()
 
-	// 2. 構造並發送協議握手包
+	// 2. 构造协议握手包
 	var payload []byte
 	var hErr error
 	targetHost := id.LocalAddress.String()
@@ -139,54 +145,84 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 	}
 
 	if hErr != nil {
-		log.Printf("握手包構造失敗: %v", hErr)
+		log.Printf("[TCP] Handshake build failed: %v", hErr)
 		r.Complete(true)
 		return
 	}
 
+	// 发送握手包
 	if len(payload) > 0 {
 		if _, err := remoteConn.Write(payload); err != nil {
+			log.Printf("[TCP] Handshake send failed: %v", err)
 			r.Complete(true)
 			return
 		}
 	}
 
-	// 3. 接受本地連接
+	// 3. 接受本地连接 (gVisor -> App)
 	var wq waiter.Queue
 	ep, err := r.CreateEndpoint(&wq)
 	if err != nil {
+		log.Printf("[TCP] CreateEndpoint failed: %v", err)
 		r.Complete(true)
 		return
 	}
-	r.Complete(false)
+	r.Complete(false) // false 表示我们要处理这个连接，不要 RST
 
 	localConn := gonet.NewTCPConn(&wq, ep)
 	defer localConn.Close()
 
-	// 4. 雙向轉發
-	errChan := make(chan error, 2)
+	// 4. 双向数据转发与诊断
+	// log.Printf("[TCP] Tunnel established: %s:%d", targetHost, targetPort)
+
+	// 使用 channel 监控 Rx 方向是否完成
+	rxDone := make(chan struct{})
+
+	// --- 方向 A: Remote (代理) -> Local (手机 App) [Rx] ---
 	go func() {
-		_, err := io.Copy(remoteConn, localConn)
-		errChan <- err
-	}()
-	go func() {
-		_, err := io.Copy(localConn, remoteConn)
-		errChan <- err
+		defer close(rxDone)
+		// 从远程读取，写入本地
+		n, err := io.Copy(localConn, remoteConn)
+		
+		if n > 0 {
+			// [关键诊断点]
+			// 如果这里打印了 > 0 的字节，说明代理服务器正常回传了数据。
+			// 如果此时手机上显示网速为 0，则必定是 TUN 接口 Checksum 问题。
+			log.Printf("[TCP] Rx (Remote->App) Success: %d bytes. (Err: %v)", n, err)
+		} else {
+			// 如果这里是 0，说明连接刚建立就被关闭，或者代理服务器没有发送任何数据就断开了。
+			log.Printf("[TCP] Rx (Remote->App) Zero bytes! Proxy no response. (Err: %v)", err)
+		}
+		// 关闭本地连接的写入端，这会向 App 发送 FIN
+		localConn.CloseWrite()
 	}()
 
-	<-errChan
+	// --- 方向 B: Local (手机 App) -> Remote (代理) [Tx] ---
+	go func() {
+		// 从本地读取，写入远程
+		n, err := io.Copy(remoteConn, localConn)
+		if err != nil && err != io.EOF {
+			log.Printf("[TCP] Tx (App->Remote) Error: %v (Sent: %d)", err, n)
+		}
+		// 关闭远程连接的读取端，这会强制中断 Rx 协程中的 Read 操作
+		remoteConn.SetReadDeadline(time.Now())
+	}()
+
+	// 等待 Rx 结束才退出 handleTCP，确保资源不提前释放
+	<-rxDone
 }
 
 func (s *Stack) handleUDP(r *udp.ForwarderRequest) {
 	defer func() {
 		if err := recover(); err != nil {
-			log.Printf("UDP處理異常: %v", err)
+			log.Printf("[UDP] Panic recovered: %v", err)
 		}
 	}()
 
 	id := r.ID()
 	targetPort := int(id.LocalPort)
     
+	// 拦截 DNS 请求
 	if targetPort == 53 {
 		var wq waiter.Queue
 		ep, err := r.CreateEndpoint(&wq)
@@ -197,6 +233,7 @@ func (s *Stack) handleUDP(r *udp.ForwarderRequest) {
 	}
 
 	targetIP := net.IP(id.LocalAddress.AsSlice()).String()
+	// 构造 NAT Key
 	srcKey := fmt.Sprintf("%s:%d->%s:%d", id.RemoteAddress.String(), id.RemotePort, targetIP, targetPort)
 
 	var wq waiter.Queue
@@ -204,16 +241,22 @@ func (s *Stack) handleUDP(r *udp.ForwarderRequest) {
 	if err != nil { return }
 
 	localConn := gonet.NewUDPConn(s.stack, &wq, ep)
+	
+	// 获取或创建 NAT 会话
 	session, natErr := s.nat.GetOrCreate(srcKey, localConn, targetIP, targetPort)
 	if natErr != nil {
+		log.Printf("[UDP] NAT create failed: %v", natErr)
 		localConn.Close()
 		return
 	}
 
+	// 启动单向转发 (Local -> Remote)
+	// Remote -> Local 的转发由 NAT Manager 负责
 	go func() {
 		defer localConn.Close()
 		buf := make([]byte, 4096)
 		for {
+			// 设置读取超时，防止协程泄漏
 			localConn.SetDeadline(time.Now().Add(60 * time.Second))
 			n, rErr := localConn.Read(buf)
 			if rErr != nil { return }
@@ -229,11 +272,16 @@ func (s *Stack) handleLocalDNS(conn *gonet.UDPConn) {
 	n, err := conn.Read(buf)
 	if err != nil { return }
 
+	// 这里硬编码了阿里 DNS (TCP)，实际可改为配置项
 	realDNS := "223.5.5.5:53"
 	tcpConn, err := net.DialTimeout("tcp", realDNS, 3*time.Second)
-	if err != nil { return }
+	if err != nil {
+		log.Printf("[DNS] Dial failed: %v", err)
+		return 
+	}
 	defer tcpConn.Close()
 
+	// 封装 DNS over TCP 请求 (2字节长度头)
 	reqData := make([]byte, 2+n)
 	reqData[0] = byte(n >> 8)
 	reqData[1] = byte(n)
@@ -241,16 +289,21 @@ func (s *Stack) handleLocalDNS(conn *gonet.UDPConn) {
 
 	if _, err := tcpConn.Write(reqData); err != nil { return }
 
+	// 读取响应长度
 	lenBuf := make([]byte, 2)
 	if _, err := io.ReadFull(tcpConn, lenBuf); err != nil { return }
 	respLen := int(lenBuf[0])<<8 | int(lenBuf[1])
 
+	// 读取响应体
 	respBuf := make([]byte, respLen)
 	if _, err := io.ReadFull(tcpConn, respBuf); err != nil { return }
+	
+	// 写回 UDP 给 Android
 	conn.Write(respBuf)
 }
 
 func (s *Stack) Close() {
+	log.Println("[Stack] Stopping and cleaning up...")
 	s.cancel()
 	if s.device != nil { s.device.Close() }
 	if s.stack != nil { s.stack.Close() }
