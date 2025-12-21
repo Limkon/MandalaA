@@ -1,3 +1,5 @@
+// 文件路径: android/app/src/main/java/com/example/mandala/viewmodel/MainViewModel.kt
+
 package com.example.mandala.viewmodel
 
 import android.app.Application
@@ -11,8 +13,8 @@ import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import mobile.Mobile
 
-// AppStrings 数据类和常量保持不变...
-// (为了节省篇幅，此处省略 AppStrings, ChineseStrings, EnglishStrings 的定义，请保留原有代码)
+// --- 数据模型定义 ---
+
 data class AppStrings(
     val home: String,
     val profiles: String,
@@ -112,6 +114,8 @@ data class Node(
 enum class AppThemeMode { SYSTEM, LIGHT, DARK }
 enum class AppLanguage { CHINESE, ENGLISH }
 
+// --- ViewModel 实现 ---
+
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val repository = NodeRepository(application)
     private val prefs = application.getSharedPreferences("mandala_settings", Context.MODE_PRIVATE)
@@ -169,6 +173,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _isConnected.value = Mobile.isRunning()
     }
 
+    // --- 设置更新 ---
+
     fun updateSetting(key: String, value: Boolean) {
         prefs.edit().putBoolean(key, value).apply()
         when (key) {
@@ -197,18 +203,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _language.value = lang
     }
 
+    // --- 节点管理与连接 ---
+
     fun refreshNodes() {
         viewModelScope.launch {
             val saved = repository.loadNodes()
             _nodes.value = saved
             
-            // [修复] 启动时查找 saved 中 isSelected 为 true 的节点
             val lastSelected = saved.find { it.isSelected }
             
             if (lastSelected != null) {
                 _currentNode.value = lastSelected
             } else if (saved.isNotEmpty() && _currentNode.value.protocol == "none") {
-                // 如果没有找到选中的，默认选第一个
                 _currentNode.value = saved[0]
             }
         }
@@ -232,16 +238,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun selectNode(node: Node) {
-        // [修复] 选中节点时，更新内存和文件中的状态
+        // 更新 UI 当前选中状态
         val updatedNode = node.copy(isSelected = true)
         _currentNode.value = updatedNode
         addLog("[系统] 已选择: ${node.tag}")
 
         viewModelScope.launch {
-            // 遍历更新整个列表的选中状态
+            // 遍历更新整个列表的 isSelected 字段，确保唯一选中
             val currentList = _nodes.value.map { 
-                // 通过关键字段判断是否为当前选中的节点
-                // 注意：这里我们假设 server/port/protocol/tag 组合是唯一的
                 if (it.server == node.server && it.port == node.port && 
                     it.protocol == node.protocol && it.tag == node.tag) {
                     it.copy(isSelected = true)
@@ -254,6 +258,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    // [新增] 添加新节点方法
+    fun addNode(node: Node) {
+        viewModelScope.launch {
+            val currentList = _nodes.value.toMutableList()
+            // 新增节点默认不选中，除非列表为空
+            val nodeToSave = if (currentList.isEmpty()) node.copy(isSelected = true) else node.copy(isSelected = false)
+            
+            currentList.add(nodeToSave)
+            repository.saveNodes(currentList)
+            _nodes.value = currentList
+            
+            if (currentList.size == 1) {
+                _currentNode.value = nodeToSave
+            }
+            
+            addLog("[系统] 已添加: ${node.tag}")
+        }
+    }
+
     fun deleteNode(node: Node) {
         viewModelScope.launch {
             val currentList = _nodes.value.toMutableList()
@@ -262,10 +285,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             
             if (_currentNode.value == node) {
                  if (currentList.isNotEmpty()) {
-                     // 如果删除了当前选中的节点，默认选第一个并保存状态
+                     // 如果删除了当前选中的节点，默认选第一个
                      val nextNode = currentList[0].copy(isSelected = true)
                      _currentNode.value = nextNode
-                     // 更新列表状态以确保第一个被标记为选中
                      val updatedList = currentList.mapIndexed { index, item ->
                          if (index == 0) item.copy(isSelected = true) else item.copy(isSelected = false)
                      }
@@ -287,7 +309,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val currentList = _nodes.value.toMutableList()
             val index = currentList.indexOf(oldNode)
             if (index != -1) {
-                // 保持原有的选中状态，或者如果它是当前节点，强制选中
                 val isSelected = oldNode.isSelected || (_currentNode.value == oldNode)
                 val nodeToSave = newNode.copy(isSelected = isSelected)
                 
@@ -330,7 +351,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                     
                     if (!exists) {
-                        // 新导入的节点默认不选中
                         current.add(node.copy(isSelected = false))
                         addedCount++
                     }
@@ -338,7 +358,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
                 if (addedCount > 0) {
                     repository.saveNodes(current)
-                    refreshNodes() // 刷新列表以显示新节点
+                    refreshNodes()
                     val msg = "成功导入 $addedCount 个节点" + if (newNodes.size > addedCount) " (过滤 ${newNodes.size - addedCount} 个重复)" else ""
                     addLog("[系统] $msg")
                     onResult(true, msg)
@@ -359,6 +379,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun generateConfigJson(node: Node): String {
+        // [注意] 对于 Socks/Shadowsocks，核心通常通过 transport/type 字段判断是否启用 TLS
+        // 这里 useTls 主要用于 Vmess/Vless/Trojan 的 tls 对象生成
         val useTls = node.protocol != "socks" && node.protocol != "shadowsocks"
         return """
         {
