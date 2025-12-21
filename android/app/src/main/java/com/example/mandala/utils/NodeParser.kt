@@ -27,6 +27,7 @@ object NodeParser {
     }
 
     fun parse(link: String): Node? {
+        // 这里的 replace 会移除行内的换行符，对于单行链接是安全的
         val trimmed = link.trim().replace("\n", "").replace("\r", "")
         return try {
             when {
@@ -34,8 +35,8 @@ object NodeParser {
                 trimmed.startsWith("vmess://", ignoreCase = true) -> parseVmess(trimmed)
                 trimmed.startsWith("vless://", ignoreCase = true) -> parseVless(trimmed)
                 trimmed.startsWith("trojan://", ignoreCase = true) -> parseTrojan(trimmed)
+                // [修复] 支持 Shadowsocks 和 Socks5 (包含 socks://)
                 trimmed.startsWith("ss://", ignoreCase = true) -> parseShadowsocks(trimmed)
-                // [修复] 同时支持 socks5:// 和 socks:// (兼容通用格式)
                 trimmed.startsWith("socks5://", ignoreCase = true) -> parseSocks5(trimmed)
                 trimmed.startsWith("socks://", ignoreCase = true) -> parseSocks5(trimmed)
                 else -> null
@@ -89,7 +90,7 @@ object NodeParser {
 
         return Node(
             tag = json.get("ps")?.asString?.let { Uri.decode(it) } ?: "未命名VMess",
-            protocol = "vless", // 注意：VMess 在此项目中映射为 Vless 处理
+            protocol = "vless", // 注意：VMess 在此项目中映射为 Vless 处理 (根据原有代码逻辑)
             server = json.get("add")?.asString ?: return null,
             port = port,
             uuid = json.get("id")?.asString ?: "",
@@ -127,8 +128,8 @@ object NodeParser {
         )
     }
 
-    // [修复] 解析 Shadowsocks 链接 (参考 C 语言 ParseSSPlugin 逻辑)
-    // 增加对 plugin 参数的解析，以支持 v2ray-plugin (WebSocket) 等场景
+    // [修复] 解析 Shadowsocks 链接 (增加 Plugin 支持)
+    // 支持 ss://method:password@host:port 和 ss://BASE64(method:password)@host:port
     private fun parseShadowsocks(link: String): Node? {
         var cleanLink = link
         var tag = "未命名SS"
@@ -139,24 +140,26 @@ object NodeParser {
             cleanLink = link.substringBeforeLast("#")
         }
 
+        // 尝试解析 URI
         var uri = Uri.parse(cleanLink)
         var host = uri.host
         var port = uri.port
         var userInfo = uri.userInfo ?: ""
 
-        // 如果 host 为空，尝试处理 ss://BASE64 格式
+        // 如果 host 为空，可能是 ss://BASE64_ALL 格式
         if (host.isNullOrEmpty()) {
-            // [Fix] 移除 ss:// 前缀后，仅取 ? 之前的部分进行解码，避免 query 参数干扰 Base64
+            // 移除 ss:// 前缀，且只取 ? 之前的部分进行 Base64 解码，避免参数干扰
             val base64Full = cleanLink.removePrefix("ss://")
             val base64Clean = if (base64Full.contains("?")) base64Full.substringBefore("?") else base64Full
             
             try {
+                // 尝试 Base64 解码主体内容
                 val decoded = String(Base64.decode(base64Clean, Base64.URL_SAFE or Base64.NO_WRAP), StandardCharsets.UTF_8)
-                // 重新构造 URI 解析
-                // 注意：如果原链接包含 plugin 参数 (SIP002)，它通常在 base64 之后，需要保留
+                // 拼接回参数部分（如果有）
                 val queryPart = if (base64Full.contains("?")) "?" + base64Full.substringAfter("?") else ""
-                uri = Uri.parse("ss://$decoded$queryPart")
                 
+                // 重新解析解码后的链接
+                uri = Uri.parse("ss://$decoded$queryPart")
                 host = uri.host
                 port = uri.port
                 userInfo = uri.userInfo ?: ""
@@ -173,6 +176,7 @@ object NodeParser {
 
         if (userInfo.isNotEmpty()) {
             if (!userInfo.contains(":")) {
+                // 可能是 Base64 编码的 method:password
                 try {
                     val decodedInfo = String(Base64.decode(userInfo, Base64.URL_SAFE or Base64.NO_WRAP), StandardCharsets.UTF_8)
                     userInfo = decodedInfo
@@ -187,24 +191,22 @@ object NodeParser {
             }
         }
 
-        // [修复] 解析 Plugin 参数 (如 v2ray-plugin, obfs)
+        // [新增] 解析 Plugin 参数 (解决 SS 连接迟钝/不通问题)
+        // 格式示例: plugin=v2ray-plugin;mode=websocket;host=...
         val plugin = uri.getQueryParameter("plugin")
-        val paramSni = uri.getQueryParameter("sni") // 优先使用链接自带的 sni
+        val paramSni = uri.getQueryParameter("sni")
         
         var transport = "tcp"
         var finalSni = paramSni ?: ""
         var finalPath = "/"
         
         if (!plugin.isNullOrEmpty()) {
-            // Plugin 格式通常为: v2ray-plugin;mode=websocket;host=Example.com;path=/ws;tls
-            // 需要 URL Decode 确保分号等符号正确
             val decodedPlugin = Uri.decode(plugin)
             val parts = decodedPlugin.split(";")
             
             var pluginMode = ""
             var pluginHost = ""
             var pluginPath = ""
-            // var pluginTls = false 
             
             for (part in parts) {
                 val p = part.trim()
@@ -213,18 +215,16 @@ object NodeParser {
                     p.startsWith("host=") -> pluginHost = p.substringAfter("host=")
                     p.startsWith("obfs-host=") -> pluginHost = p.substringAfter("obfs-host=")
                     p.startsWith("path=") -> pluginPath = p.substringAfter("path=")
-                    // p == "tls" || p.endsWith("=tls") -> pluginTls = true
                 }
             }
             
-            // 如果是 WebSocket 模式
+            // 识别 WebSocket 模式
             if (pluginMode.equals("websocket", ignoreCase = true) || 
                 pluginMode.equals("ws", ignoreCase = true) || 
                 decodedPlugin.contains("v2ray-plugin")) {
                 
                 transport = "ws"
                 if (pluginPath.isNotEmpty()) finalPath = pluginPath
-                // 如果 plugin 中指定了 host，通常用于 WS 的 Host Header 和 SNI
                 if (pluginHost.isNotEmpty()) finalSni = pluginHost
             }
         }
@@ -235,33 +235,53 @@ object NodeParser {
             server = host!!,
             port = if (port > 0) port else 8388,
             password = Uri.decode(password),
-            uuid = Uri.decode(method), // Method 存入 uuid
-            transport = transport,     // [Fix] 正确设置传输方式 (ws/tcp)
-            path = finalPath,          // [Fix] 正确设置路径
-            sni = finalSni             // [Fix] 正确设置 SNI
+            uuid = Uri.decode(method), // 将加密方式 (Method) 存入 uuid 字段
+            transport = transport,     // 正确设置传输方式
+            path = finalPath,          // 正确设置路径
+            sni = finalSni             // 正确设置 SNI
         )
     }
 
-    // [修复] 解析 Socks5 链接
-    // 支持 socks:// 和 socks5://，并解析 ws/tls 参数
+    // [修复] 解析 Socks 链接 (支持 socks:// 和 socks5://)
+    // 格式: socks://BASE64_USER_INFO@host:port 或 socks5://user:pass@host:port
     private fun parseSocks5(link: String): Node? {
         val uri = Uri.parse(link)
         val host = uri.host ?: return null
-        val userInfo = uri.userInfo ?: ""
+        var userInfo = uri.userInfo ?: ""
         
         var username = ""
         var password = ""
 
+        // [新增] 智能处理 UserInfo (优先尝试 Base64 解码)
+        // 很多订阅链接的 socks:// 使用 Base64 编码的 user:pass
         if (userInfo.isNotEmpty()) {
-            if (userInfo.contains(":")) {
-                username = userInfo.substringBefore(":")
-                password = userInfo.substringAfter(":")
-            } else {
-                username = userInfo
+            var decodedSuccess = false
+            // 如果不含冒号，或者链接头是 socks:// (通常暗示 Base64)，尝试解码
+            if (!userInfo.contains(":") || link.startsWith("socks://", ignoreCase = true)) {
+                try {
+                    val decoded = String(Base64.decode(userInfo, Base64.URL_SAFE or Base64.NO_WRAP), StandardCharsets.UTF_8)
+                    if (decoded.contains(":")) {
+                        username = decoded.substringBefore(":")
+                        password = decoded.substringAfter(":")
+                        decodedSuccess = true
+                    }
+                } catch (e: Exception) {
+                    // 解码失败，回退到原始值
+                }
+            }
+
+            if (!decodedSuccess) {
+                if (userInfo.contains(":")) {
+                    username = userInfo.substringBefore(":")
+                    password = userInfo.substringAfter(":")
+                } else {
+                    username = userInfo
+                }
             }
         }
-        
-        // [修复] 获取 URL 参数
+
+        // [新增] 解析 URL 参数 (sni, path, type)
+        // 解决部分高级 Socks5 节点无法连接的问题
         val type = uri.getQueryParameter("type")
         val path = uri.getQueryParameter("path")
         val sni = uri.getQueryParameter("sni")
@@ -275,11 +295,11 @@ object NodeParser {
             protocol = "socks5",
             server = host,
             port = if (uri.port > 0) uri.port else 1080,
-            password = Uri.decode(password), 
-            uuid = Uri.decode(username),     
-            transport = transport,           // [Fix] 支持 ws 传输
-            path = finalPath,                // [Fix] 支持 path
-            sni = finalSni                   // [Fix] 支持 sni
+            password = Uri.decode(password), // 密码
+            uuid = Uri.decode(username),     // 将用户名存入 uuid 字段
+            transport = transport,           // 支持 ws
+            path = finalPath,                // 支持 path
+            sni = finalSni                   // 支持 sni
         )
     }
 }
