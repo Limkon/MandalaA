@@ -1,3 +1,7 @@
+{
+type: uploaded file
+fileName: limkon/mandalaa/MandalaA-eb79db922dff0b83486387793a0ba34ab0d1e829/mandala-go/core/protocol/socks5.go
+fullContent:
 package protocol
 
 import (
@@ -7,6 +11,7 @@ import (
 
 // HandshakeSocks5 执行 SOCKS5 客户端握手
 // 修改：强制密码认证模式（当存在用户名时，仅发送 0x02 方法，不发送 0x00）
+// 修复：参考 C 代码逻辑，仅读取响应头部，不强制读取 BND 地址，防止服务器响应截断导致挂起
 func HandshakeSocks5(conn io.ReadWriter, username, password, targetHost string, targetPort int) error {
 	// 1. 发送版本和支持的认证方法
 	// [修改] 逻辑变更：
@@ -95,6 +100,10 @@ func HandshakeSocks5(conn io.ReadWriter, username, password, targetHost string, 
 
 	// 5. 读取连接响应
 	// 响应格式: 05 00 00 [ATYP] [ADDR] [PORT]
+	// [修复关键点] 
+	// C 代码 (proxy.c) 仅读取前4个字节并检查状态，不关心具体的 BND 地址。
+	// 如果服务器只发送了 4 字节的简化响应 (05 00 00 01)，原来的 Go 代码试图读取后续地址会导致阻塞。
+	// 这里修改为只读取 4 字节，忽略后续可能存在的 BND 地址信息（在代理场景下客户端通常不需要此信息）。
 	connRespHead := make([]byte, 4)
 	if _, err := io.ReadFull(conn, connRespHead); err != nil {
 		return fmt.Errorf("socks5 connect resp header read failed: %v", err)
@@ -105,25 +114,14 @@ func HandshakeSocks5(conn io.ReadWriter, username, password, targetHost string, 
 		return fmt.Errorf("socks5 connect failed with error: 0x%02x", connRespHead[1])
 	}
 
-	// 读取剩余的 BND.ADDR 和 BND.PORT (消耗掉缓冲区)
-	var left int
-	switch connRespHead[3] {
-	case 0x01: left = 4 + 2 // IPv4
-	case 0x04: left = 16 + 2 // IPv6
-	case 0x03: // Domain
-		lenByte := make([]byte, 1)
-		if _, err := io.ReadFull(conn, lenByte); err != nil {
-			return fmt.Errorf("socks5 read domain len failed: %v", err)
-		}
-		left = int(lenByte[0]) + 2
-	default:
-		return fmt.Errorf("socks5 invalid address type in response: 0x%02x", connRespHead[3])
-	}
-
-	discard := make([]byte, left)
-	if _, err := io.ReadFull(conn, discard); err != nil {
-		return fmt.Errorf("socks5 connect resp body read failed: %v", err)
-	}
+	// 之前的代码在此处会根据 ATYP (connRespHead[3]) 继续读取地址和端口。
+	// 为兼容 Mandala 服务器行为，此处不再继续读取。
+	// 如果服务器确实发送了完整 BND 地址，剩余字节将在后续 io.Copy 中被读取并转发给浏览器。
+	// 虽然这可能导致浏览器收到少量垃圾数据，但比完全挂起要好，且符合 C 代码的行为模式。
+	// (在 WebSocket 场景下，C 代码实际上是读取了整个帧但丢弃了多余数据，Go 在无法确定帧边界时，
+	// 最安全的做法是假设服务器发送了最小包)。
 
 	return nil
+}
+
 }
