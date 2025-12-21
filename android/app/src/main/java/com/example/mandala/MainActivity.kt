@@ -1,13 +1,18 @@
 package com.example.mandala
 
 import android.app.Activity
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.net.VpnService
+import android.os.Build
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Home
@@ -29,20 +34,19 @@ import com.example.mandala.ui.home.HomeScreen
 import com.example.mandala.ui.profiles.ProfilesScreen
 import com.example.mandala.ui.settings.SettingsScreen
 import com.example.mandala.ui.theme.MandalaTheme
+import com.example.mandala.viewmodel.AppThemeMode
 import com.example.mandala.viewmodel.MainViewModel
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
 
     private var pendingConfigJson: String? = null
+    private lateinit var vpnStateReceiver: BroadcastReceiver
 
-    // 注册 VPN 权限请求回调
-    // 当 VpnService.prepare() 返回 Intent 时，需要使用此 Launcher 启动系统授权弹窗
     private val vpnPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
         if (result.resultCode == Activity.RESULT_OK) {
-            // 用户点击了“确定”，同意授权，现在可以启动服务了
             pendingConfigJson?.let { startVpnService(it) }
         } else {
             Toast.makeText(this, "需要 VPN 权限才能连接", Toast.LENGTH_SHORT).show()
@@ -52,12 +56,37 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         
+        // 获取 ViewModel 实例 (用于在 Receiver 中调用)
+        val viewModel = androidx.lifecycle.ViewModelProvider(this)[MainViewModel::class.java]
+
+        // [修复] 初始化广播接收器，监听 Service 真正停止的事件
+        vpnStateReceiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                if (intent?.action == MandalaVpnService.ACTION_VPN_STOPPED) {
+                    viewModel.onVpnStopped()
+                }
+            }
+        }
+        
+        // 注册广播
+        val filter = IntentFilter(MandalaVpnService.ACTION_VPN_STOPPED)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(vpnStateReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            registerReceiver(vpnStateReceiver, filter)
+        }
+        
         setContent {
-            MandalaTheme {
-                // 在 Compose 中获取 ViewModel (Factory 会自动处理 AndroidViewModel)
-                val viewModel: MainViewModel = viewModel()
-                
-                // 监听 ViewModel 发出的 VPN 事件 (启动/停止)
+            // [新增] 监听主题设置
+            val themeMode by viewModel.themeMode.collectAsState()
+            val isDarkTheme = when (themeMode) {
+                AppThemeMode.LIGHT -> false
+                AppThemeMode.DARK -> true
+                else -> isSystemInDarkTheme() // SYSTEM
+            }
+
+            MandalaTheme(darkTheme = isDarkTheme) {
+                // 监听 VPN 启动/停止指令
                 LaunchedEffect(Unit) {
                     lifecycleScope.launch {
                         repeatOnLifecycle(Lifecycle.State.STARTED) {
@@ -71,43 +100,42 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
-                // 加载主界面 UI
                 MainApp(viewModel)
             }
         }
     }
 
-    // 准备启动 VPN：先检查是否有权限
+    override fun onDestroy() {
+        super.onDestroy()
+        // [修复] 注销广播，防止泄漏
+        try {
+            unregisterReceiver(vpnStateReceiver)
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
     private fun prepareAndStartVpn(configJson: String) {
         pendingConfigJson = configJson
-        
-        // 检查系统 VPN 权限，如果返回 null 表示已经有权限
         val intent = VpnService.prepare(this)
         if (intent != null) {
-            // 需要请求权限，弹出系统对话框
             vpnPermissionLauncher.launch(intent)
         } else {
-            // 已有权限，直接启动服务
             startVpnService(configJson)
         }
     }
 
-    // 实际启动 VPN 服务 (前台服务)
     private fun startVpnService(configJson: String) {
         val intent = Intent(this, MandalaVpnService::class.java).apply {
             action = MandalaVpnService.ACTION_START
             putExtra(MandalaVpnService.EXTRA_CONFIG, configJson)
         }
-        // Android 8.0+ 必须使用 startForegroundService 启动后台常驻服务
         startForegroundService(intent)
         
-        // 通知 ViewModel 更新连接状态
-        // 实际项目中建议通过 BroadcastReceiver 或 AIDL 通信，这里简化处理
-        val viewModel: MainViewModel = androidx.lifecycle.ViewModelProvider(this)[MainViewModel::class.java]
+        val viewModel = androidx.lifecycle.ViewModelProvider(this)[MainViewModel::class.java]
         viewModel.onVpnStarted()
     }
 
-    // 停止 VPN 服务
     private fun stopVpnService() {
         val intent = Intent(this, MandalaVpnService::class.java).apply {
             action = MandalaVpnService.ACTION_STOP
@@ -120,13 +148,13 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun MainApp(viewModel: MainViewModel) {
     val navController = rememberNavController()
+    // [新增] 监听多语言字符串
+    val strings by viewModel.appStrings.collectAsState()
     
-    // 底部导航配置 - 使用中文标签
-    // Triple: (Label, Route, Icon)
     val navItems = listOf(
-        Triple("首页", "Home", Icons.Filled.Home),
-        Triple("节点", "Profiles", Icons.Filled.List),
-        Triple("设置", "Settings", Icons.Filled.Settings)
+        Triple(strings.home, "Home", Icons.Filled.Home),
+        Triple(strings.profiles, "Profiles", Icons.Filled.List),
+        Triple(strings.settings, "Settings", Icons.Filled.Settings)
     )
 
     Scaffold(
@@ -142,7 +170,6 @@ fun MainApp(viewModel: MainViewModel) {
                         selected = currentRoute == route,
                         onClick = {
                             navController.navigate(route) {
-                                // 避免堆叠过多页面
                                 popUpTo(navController.graph.startDestinationId) {
                                     saveState = true
                                 }
@@ -155,10 +182,9 @@ fun MainApp(viewModel: MainViewModel) {
             }
         }
     ) { innerPadding ->
-        // 导航主机
         NavHost(
             navController = navController,
-            startDestination = "Home", // 路由 Key 保持英文
+            startDestination = "Home",
             modifier = Modifier.padding(innerPadding)
         ) {
             composable("Home") { HomeScreen(viewModel) }
