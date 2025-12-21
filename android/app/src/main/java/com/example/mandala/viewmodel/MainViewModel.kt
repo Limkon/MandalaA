@@ -11,6 +11,8 @@ import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import mobile.Mobile
 
+// AppStrings 数据类和常量保持不变...
+// (为了节省篇幅，此处省略 AppStrings, ChineseStrings, EnglishStrings 的定义，请保留原有代码)
 data class AppStrings(
     val home: String,
     val profiles: String,
@@ -199,7 +201,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             val saved = repository.loadNodes()
             _nodes.value = saved
-            if (saved.isNotEmpty() && _currentNode.value.protocol == "none") {
+            
+            // [修复] 启动时查找 saved 中 isSelected 为 true 的节点
+            val lastSelected = saved.find { it.isSelected }
+            
+            if (lastSelected != null) {
+                _currentNode.value = lastSelected
+            } else if (saved.isNotEmpty() && _currentNode.value.protocol == "none") {
+                // 如果没有找到选中的，默认选第一个
                 _currentNode.value = saved[0]
             }
         }
@@ -223,8 +232,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun selectNode(node: Node) {
-        _currentNode.value = node
+        // [修复] 选中节点时，更新内存和文件中的状态
+        val updatedNode = node.copy(isSelected = true)
+        _currentNode.value = updatedNode
         addLog("[系统] 已选择: ${node.tag}")
+
+        viewModelScope.launch {
+            // 遍历更新整个列表的选中状态
+            val currentList = _nodes.value.map { 
+                // 通过关键字段判断是否为当前选中的节点
+                // 注意：这里我们假设 server/port/protocol/tag 组合是唯一的
+                if (it.server == node.server && it.port == node.port && 
+                    it.protocol == node.protocol && it.tag == node.tag) {
+                    it.copy(isSelected = true)
+                } else {
+                    it.copy(isSelected = false)
+                }
+            }
+            _nodes.value = currentList
+            repository.saveNodes(currentList)
+        }
     }
 
     fun deleteNode(node: Node) {
@@ -235,13 +262,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             
             if (_currentNode.value == node) {
                  if (currentList.isNotEmpty()) {
-                     _currentNode.value = currentList[0]
+                     // 如果删除了当前选中的节点，默认选第一个并保存状态
+                     val nextNode = currentList[0].copy(isSelected = true)
+                     _currentNode.value = nextNode
+                     // 更新列表状态以确保第一个被标记为选中
+                     val updatedList = currentList.mapIndexed { index, item ->
+                         if (index == 0) item.copy(isSelected = true) else item.copy(isSelected = false)
+                     }
+                     _nodes.value = updatedList
+                     repository.saveNodes(updatedList)
                  } else {
                      _currentNode.value = Node("未选择", "none", "0.0.0.0", 0)
+                     _nodes.value = emptyList()
                  }
+            } else {
+                _nodes.value = currentList
             }
-            
-            _nodes.value = currentList
             addLog("[系统] 已删除: ${node.tag}")
         }
     }
@@ -251,11 +287,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val currentList = _nodes.value.toMutableList()
             val index = currentList.indexOf(oldNode)
             if (index != -1) {
-                currentList[index] = newNode
+                // 保持原有的选中状态，或者如果它是当前节点，强制选中
+                val isSelected = oldNode.isSelected || (_currentNode.value == oldNode)
+                val nodeToSave = newNode.copy(isSelected = isSelected)
+                
+                currentList[index] = nodeToSave
                 repository.saveNodes(currentList)
                 
                 if (_currentNode.value == oldNode) {
-                    _currentNode.value = newNode
+                    _currentNode.value = nodeToSave
                 }
                 
                 _nodes.value = currentList
@@ -274,9 +314,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         addLog("[核心] 连接已关闭")
     }
 
-    // [修改] 修复后的多节点导入逻辑
     fun importFromText(text: String, onResult: (Boolean, String) -> Unit) {
-        // 使用 parseList 处理多行/多链接文本
         val newNodes = NodeParser.parseList(text)
         
         if (newNodes.isNotEmpty()) {
@@ -285,7 +323,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 var addedCount = 0
                 
                 for (node in newNodes) {
-                    // 简单的重复检测 (基于服务器地址、端口和协议)
                     val exists = current.any { 
                         it.server == node.server && 
                         it.port == node.port && 
@@ -293,14 +330,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                     
                     if (!exists) {
-                        current.add(node)
+                        // 新导入的节点默认不选中
+                        current.add(node.copy(isSelected = false))
                         addedCount++
                     }
                 }
 
                 if (addedCount > 0) {
                     repository.saveNodes(current)
-                    refreshNodes()
+                    refreshNodes() // 刷新列表以显示新节点
                     val msg = "成功导入 $addedCount 个节点" + if (newNodes.size > addedCount) " (过滤 ${newNodes.size - addedCount} 个重复)" else ""
                     addLog("[系统] $msg")
                     onResult(true, msg)
