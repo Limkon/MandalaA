@@ -9,7 +9,6 @@ import android.os.Build
 import android.os.ParcelFileDescriptor
 import androidx.core.app.NotificationCompat
 import com.example.mandala.MainActivity
-import com.example.mandala.R
 import mobile.Mobile
 
 class MandalaVpnService : VpnService() {
@@ -68,7 +67,8 @@ class MandalaVpnService : VpnService() {
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Mandala VPN")
             .setContentText(content)
-            .setSmallIcon(android.R.drawable.ic_menu_share) // 建议后续换成您的 App 图标
+            // 如果你有自定义图标，请替换下面的 android.R.drawable.ic_menu_share
+            .setSmallIcon(android.R.drawable.ic_menu_share) 
             .setContentIntent(pendingIntent)
             .setOngoing(true)
             .build()
@@ -81,7 +81,9 @@ class MandalaVpnService : VpnService() {
                 .addRoute("0.0.0.0", 0)
                 .addRoute("::", 0)
                 .setMtu(1500)
-                .addDnsServer("223.5.5.5")
+                // [关键修改] 使用 Google DNS，确保流量被标准路由
+                // Go 核心会拦截这个 IP 的 53 端口流量，并重定向到代理
+                .addDnsServer("8.8.8.8")
                 .addDisallowedApplication(packageName)
                 .setSession("Mandala Core")
 
@@ -92,8 +94,10 @@ class MandalaVpnService : VpnService() {
                 manager.notify(NOTIFICATION_ID, createNotification("VPN 已连接"))
 
                 // 传入 FD 给 Go 核心
+                // 注意：这里 it.fd 是 Int，Go 接口可能定义为 Long，需要转换
                 val err = Mobile.startVpn(it.fd.toLong(), 1500L, configJson)
                 if (err.isNotEmpty()) {
+                    // 如果 Go 核心启动失败，记录日志或停止 VPN
                     stopVpn()
                 }
             }
@@ -104,8 +108,18 @@ class MandalaVpnService : VpnService() {
     }
 
     private fun stopVpn() {
-        Mobile.stop() // 调用 Go 核心停止
-        vpnInterface?.close()
+        try {
+            Mobile.stop() // 调用 Go 核心停止
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        
+        try {
+            vpnInterface?.close()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        
         vpnInterface = null
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
