@@ -46,9 +46,16 @@ func (d *Device) LinkEndpoint() stack.LinkEndpoint {
 		
 		// 关键配置组：
 		EthernetHeader:    false, // 确保是 TUN 模式而非 TAP
-		// PacketInfo:     false, // [已删除] 旧版 gVisor 不支持此字段，删除以修复编译错误
-		RXChecksumOffload: false, // 关闭接收卸载
-		TXChecksumOffload: false, // 关闭发送卸载 (强制 gVisor 计算 Checksum)
+		
+		// [修复] RXChecksumOffload 必须为 true。
+		// Android 系统发给 TUN 的包可能没有计算校验和（伪头部校验和），
+		// 如果让 gVisor 去验证(false)，它会丢弃这些包，导致无法建立连接(RX=0)。
+		RXChecksumOffload: true, 
+
+		// [保持] TXChecksumOffload 必须为 false。
+		// 我们需要 gVisor 在写入 TUN (发给 Android) 之前计算好校验和，
+		// 否则 Android 系统收到包后会因为校验和错误而丢弃。
+		TXChecksumOffload: false, 
 	})
 
 	if err != nil {
@@ -56,7 +63,7 @@ func (d *Device) LinkEndpoint() stack.LinkEndpoint {
 		return nil
 	}
 
-	log.Println("GoLog: [Device] Endpoint created. RX/TX Checksum Offload: DISABLED")
+	log.Println("GoLog: [Device] Endpoint created. RX Checksum Offload: ENABLED (Skip Verify), TX: DISABLED (Calc)")
 	return ep
 }
 
