@@ -5,6 +5,7 @@ import (
 	"log"
 	"net"
 	"strings"
+	"syscall"
 	"time"
 
 	"mandala/core/config"
@@ -35,12 +36,10 @@ func (h *Handler) HandleConnection(localConn net.Conn) {
 	if err != nil || n < 4 {
 		return
 	}
-
 	cmd := buf[1]
 	atyp := buf[3]
 	var targetHost string
 	var targetPort int
-
 	if cmd != 0x01 {
 		return
 	}
@@ -73,7 +72,6 @@ func (h *Handler) HandleConnection(localConn net.Conn) {
 	default:
 		return
 	}
-
 	portBuf := make([]byte, 2)
 	if _, err := io.ReadFull(localConn, portBuf); err != nil {
 		return
@@ -93,7 +91,6 @@ func (h *Handler) HandleConnection(localConn net.Conn) {
 	// 4. 发送协议头 (握手)
 	proxyType := strings.ToLower(h.Config.Type)
 	isVless := false
-
 	switch proxyType {
 	case "mandala":
 		client := protocol.NewMandalaClient(h.Config.Username, h.Config.Password)
@@ -106,7 +103,6 @@ func (h *Handler) HandleConnection(localConn net.Conn) {
 			log.Printf("[Mandala] Handshake write failed: %v", err)
 			return
 		}
-
 	case "trojan":
 		payload, err := protocol.BuildTrojanPayload(h.Config.Password, targetHost, targetPort)
 		if err != nil {
@@ -117,7 +113,6 @@ func (h *Handler) HandleConnection(localConn net.Conn) {
 			log.Printf("[Trojan] Handshake write failed: %v", err)
 			return
 		}
-
 	case "vless":
 		payload, err := protocol.BuildVlessPayload(h.Config.UUID, targetHost, targetPort)
 		if err != nil {
@@ -129,8 +124,6 @@ func (h *Handler) HandleConnection(localConn net.Conn) {
 			return
 		}
 		isVless = true
-
-	// [新增] Shadowsocks 支持
 	case "shadowsocks":
 		payload, err := protocol.BuildShadowsocksPayload(targetHost, targetPort)
 		if err != nil {
@@ -141,15 +134,12 @@ func (h *Handler) HandleConnection(localConn net.Conn) {
 			log.Printf("[Shadowsocks] Handshake write failed: %v", err)
 			return
 		}
-
-	// [新增] SOCKS5 支持 (含认证)
 	case "socks", "socks5":
 		err := protocol.HandshakeSocks5(remoteConn, h.Config.Username, h.Config.Password, targetHost, targetPort)
 		if err != nil {
 			log.Printf("[Socks5] Handshake failed: %v", err)
 			return
 		}
-
 	default:
 		log.Println("[Proxy] Protocol not implemented:", proxyType)
 		return
@@ -165,21 +155,41 @@ func (h *Handler) HandleConnection(localConn net.Conn) {
 		return
 	}
 
-	// 6. 双向转发
+	// 6. 双向转发（关键修改：防止碎片化）
 	localConn.SetDeadline(time.Time{})
 	remoteConn.SetDeadline(time.Time{})
 
+	// 优化：设置 TCP NoDelay 和 MSS，限制缓冲大小
+	if tcpl, ok := localConn.(*net.TCPConn); ok {
+		tcpl.SetNoDelay(true)
+	}
+	if tcpr, ok := remoteConn.(*net.TCPConn); ok {
+		tcpr.SetNoDelay(true)
+		// 设置 TCP MSS = 1360（对应 MTU 1400），防止碎片
+		if f, err := tcpr.File(); err == nil {
+			_ = syscall.SetsockoptInt(int(f.Fd()), syscall.IPPROTO_TCP, syscall.TCP_MAXSEG, 1360)
+		}
+	}
+
+	// 使用固定小缓冲区
+	buf := make([]byte, 1400)
+
 	errChan := make(chan error, 2)
-
 	go func() {
-		_, err := io.Copy(remoteConn, localConn)
+		_, err := io.CopyBuffer(remoteConn, localConn, buf)
+		errChan <- err
+	}()
+	go func() {
+		_, err := io.CopyBuffer(localConn, remoteConn, buf)
 		errChan <- err
 	}()
 
-	go func() {
-		_, err := io.Copy(localConn, remoteConn)
-		errChan <- err
-	}()
-
-	<-errChan
+	// 等待任一方向结束
+	err = <-errChan
+	if err != nil && err != io.EOF {
+		log.Printf("[Proxy] Relay error: %v", err)
+	}
+	// 关闭连接
+	localConn.Close()
+	remoteConn.Close()
 }
