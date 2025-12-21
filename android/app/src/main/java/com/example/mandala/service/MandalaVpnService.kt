@@ -15,13 +15,14 @@ class MandalaVpnService : VpnService() {
     companion object {
         const val ACTION_START = "com.example.mandala.service.START"
         const val ACTION_STOP = "com.example.mandala.service.STOP"
-        // [新增] 停止广播 Action
         const val ACTION_VPN_STOPPED = "com.example.mandala.service.VPN_STOPPED"
         
         const val EXTRA_CONFIG = "config_json"
         private const val VPN_ADDRESS = "172.16.0.1"
         private const val CHANNEL_ID = "MandalaChannel"
         private const val NOTIFICATION_ID = 1
+        // [修改] 設置 MTU 為 1400，解決 TLS/WS 封裝導致的傳輸效率低下問題
+        private const val VPN_MTU = 1400 
     }
 
     private var vpnInterface: ParcelFileDescriptor? = null
@@ -83,7 +84,7 @@ class MandalaVpnService : VpnService() {
                 .addAddress(VPN_ADDRESS, 24)
                 .addRoute("0.0.0.0", 0)
                 .addRoute("::", 0)
-                .setMtu(1500)
+                .setMtu(VPN_MTU) // 使用優化後的 MTU
                 .addDnsServer("8.8.8.8")
                 .addDisallowedApplication(packageName)
                 .setSession("Mandala Core")
@@ -93,7 +94,8 @@ class MandalaVpnService : VpnService() {
                 val manager = getSystemService(NotificationManager::class.java)
                 manager.notify(NOTIFICATION_ID, createNotification("VPN 已连接"))
 
-                val err = Mobile.startVpn(it.fd.toLong(), 1500L, configJson)
+                // 將當前 MTU 同步傳遞給 Go 核心堆棧
+                val err = Mobile.startVpn(it.fd.toLong(), VPN_MTU.toLong(), configJson)
                 if (err.isNotEmpty()) {
                     stopVpn()
                 }
@@ -121,7 +123,6 @@ class MandalaVpnService : VpnService() {
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
 
-        // [关键] 发送停止广播，通知 ViewModel 更新状态
         sendBroadcast(Intent(ACTION_VPN_STOPPED).setPackage(packageName))
     }
 
