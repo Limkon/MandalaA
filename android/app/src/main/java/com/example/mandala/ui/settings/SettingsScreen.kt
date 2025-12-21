@@ -1,5 +1,3 @@
-// 文件路径: android/app/src/main/java/com/example/mandala/ui/settings/SettingsScreen.kt
-
 package com.example.mandala.ui.settings
 
 import androidx.compose.foundation.layout.*
@@ -16,6 +14,12 @@ import com.example.mandala.viewmodel.MainViewModel
 
 @Composable
 fun SettingsScreen(viewModel: MainViewModel) {
+    // [新增] 从 ViewModel 收集设置状态
+    val vpnMode by viewModel.vpnMode.collectAsState()
+    val allowInsecure by viewModel.allowInsecure.collectAsState()
+    val tlsFragment by viewModel.tlsFragment.collectAsState()
+    val randomPadding by viewModel.randomPadding.collectAsState()
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -30,12 +34,14 @@ fun SettingsScreen(viewModel: MainViewModel) {
             SwitchSetting(
                 title = "VPN 模式",
                 subtitle = "通过 Mandala 路由所有设备流量",
-                initialState = true
+                checked = vpnMode,
+                onCheckedChange = { viewModel.updateSetting("vpn_mode", it) }
             )
             SwitchSetting(
                 title = "允许不安全连接",
                 subtitle = "跳过 TLS 证书验证 (危险)",
-                initialState = false
+                checked = allowInsecure,
+                onCheckedChange = { viewModel.updateSetting("allow_insecure", it) }
             )
         }
 
@@ -44,12 +50,14 @@ fun SettingsScreen(viewModel: MainViewModel) {
             SwitchSetting(
                 title = "TLS 分片",
                 subtitle = "拆分 TLS 记录以绕过 DPI 检测",
-                initialState = true
+                checked = tlsFragment,
+                onCheckedChange = { viewModel.updateSetting("tls_fragment", it) }
             )
             SwitchSetting(
                 title = "随机填充",
                 subtitle = "向数据包添加随机噪音",
-                initialState = false
+                checked = randomPadding,
+                onCheckedChange = { viewModel.updateSetting("random_padding", it) }
             )
             TextSetting(
                 title = "本地监听端口",
@@ -65,7 +73,7 @@ fun SettingsScreen(viewModel: MainViewModel) {
                 color = Color.Gray
             )
             Text(
-                "核心版本: Go 1.21 (Gomobile)",
+                "核心版本: Go 1.23 (Gomobile)",
                 style = MaterialTheme.typography.bodyMedium,
                 color = Color.Gray
             )
@@ -76,8 +84,8 @@ fun SettingsScreen(viewModel: MainViewModel) {
 @Composable
 fun SettingSection(title: String, content: @Composable ColumnScope.() -> Unit) {
     Text(
-        title, 
-        color = MaterialTheme.colorScheme.primary, 
+        title,
+        color = MaterialTheme.colorScheme.primary,
         style = MaterialTheme.typography.titleSmall,
         fontWeight = FontWeight.Bold
     )
@@ -93,9 +101,14 @@ fun SettingSection(title: String, content: @Composable ColumnScope.() -> Unit) {
     Spacer(modifier = Modifier.height(24.dp))
 }
 
+// [修改] 提升状态到调用方，移除内部 state
 @Composable
-fun SwitchSetting(title: String, subtitle: String, initialState: Boolean) {
-    var checked by remember { mutableStateOf(initialState) }
+fun SwitchSetting(
+    title: String,
+    subtitle: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -107,7 +120,7 @@ fun SwitchSetting(title: String, subtitle: String, initialState: Boolean) {
             Text(title, style = MaterialTheme.typography.titleMedium)
             Text(subtitle, style = MaterialTheme.typography.bodySmall, color = Color.Gray)
         }
-        Switch(checked = checked, onCheckedChange = { checked = it })
+        Switch(checked = checked, onCheckedChange = onCheckedChange)
     }
 }
 
