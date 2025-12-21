@@ -6,15 +6,17 @@ import (
 )
 
 // HandshakeSocks5 执行 SOCKS5 客户端握手
-// 支持 No Auth (0x00) 和 Username/Password Auth (0x02)
-// 文档: RFC 1928, RFC 1929
+// 修改：强制密码认证模式（当存在用户名时，仅发送 0x02 方法，不发送 0x00）
 func HandshakeSocks5(conn io.ReadWriter, username, password, targetHost string, targetPort int) error {
 	// 1. 发送版本和支持的认证方法
-	// 构造方法列表: 总是支持 0x00 (No Auth)
-	// 如果提供了用户名，额外支持 0x02 (User/Pass)
-	methods := []byte{0x00}
+	// [修改] 逻辑变更：
+	// 如果提供了用户名，方法列表只包含 0x02 (USERNAME/PASSWORD)，强制服务端使用密码认证。
+	// 只有在未提供用户名时，才发送 0x00 (NO AUTHENTICATION REQUIRED)。
+	var methods []byte
 	if username != "" {
-		methods = append(methods, 0x02)
+		methods = []byte{0x02}
+	} else {
+		methods = []byte{0x00}
 	}
 	
 	initBuf := make([]byte, 2+len(methods))
@@ -69,8 +71,14 @@ func HandshakeSocks5(conn io.ReadWriter, username, password, targetHost string, 
 			return fmt.Errorf("socks5 authentication failed (status: 0x%02x)", authResp[1])
 		}
 
+	} else if authMethod == 0xFF {
+		return fmt.Errorf("socks5 no acceptable methods (server rejected auth)")
 	} else if authMethod != 0x00 {
 		return fmt.Errorf("socks5 unsupported auth method selected: 0x%02x", authMethod)
+	} else if authMethod == 0x00 && username != "" {
+		// 如果我们发了 0x02 但服务端回了 0x00 (理论上不应发生，因为我们没发 0x00)，
+		// 或者在 username 为空时回了 0x00，这都是正常的。
+		// 但如果是“只支持密码用户”模式下，服务端回 0x00 意味着它忽略了认证需求，这里暂且允许通过。
 	}
 
 	// 4. 发送连接请求 (CONNECT CMD=0x01)
@@ -87,7 +95,6 @@ func HandshakeSocks5(conn io.ReadWriter, username, password, targetHost string, 
 
 	// 5. 读取连接响应
 	// 响应格式: 05 00 00 [ATYP] [ADDR] [PORT]
-	// 我们至少需要读取前 4 个字节来判断状态和地址类型
 	connRespHead := make([]byte, 4)
 	if _, err := io.ReadFull(conn, connRespHead); err != nil {
 		return fmt.Errorf("socks5 connect resp header read failed: %v", err)
@@ -98,17 +105,17 @@ func HandshakeSocks5(conn io.ReadWriter, username, password, targetHost string, 
 		return fmt.Errorf("socks5 connect failed with error: 0x%02x", connRespHead[1])
 	}
 
-	// 读取剩余的 BND.ADDR 和 BND.PORT (消耗掉缓冲区，以便后续数据透传)
+	// 读取剩余的 BND.ADDR 和 BND.PORT (消耗掉缓冲区)
 	var left int
 	switch connRespHead[3] {
-	case 0x01: left = 4 + 2 // IPv4(4) + Port(2)
-	case 0x04: left = 16 + 2 // IPv6(16) + Port(2)
+	case 0x01: left = 4 + 2 // IPv4
+	case 0x04: left = 16 + 2 // IPv6
 	case 0x03: // Domain
 		lenByte := make([]byte, 1)
 		if _, err := io.ReadFull(conn, lenByte); err != nil {
 			return fmt.Errorf("socks5 read domain len failed: %v", err)
 		}
-		left = int(lenByte[0]) + 2 // DomainBody + Port
+		left = int(lenByte[0]) + 2
 	default:
 		return fmt.Errorf("socks5 invalid address type in response: 0x%02x", connRespHead[3])
 	}
