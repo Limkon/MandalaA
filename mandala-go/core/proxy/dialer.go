@@ -35,7 +35,7 @@ func (d *Dialer) Dial() (net.Conn, error) {
 		return nil, err
 	}
 
-	// 强制开启 NoDelay 和 KeepAlive
+	// [优化] 强制开启 NoDelay 和 KeepAlive
 	if tcpConn, ok := conn.(*net.TCPConn); ok {
 		tcpConn.SetNoDelay(true) 
 		tcpConn.SetKeepAlive(true)
@@ -87,10 +87,10 @@ func (d *Dialer) handshakeWebSocket(conn net.Conn) (net.Conn, error) {
 	rand.Read(key)
 	keyStr := base64.StdEncoding.EncodeToString(key)
 
-	// 使用 Android Chrome User-Agent
+	// [重要] 使用 Android User-Agent，防止被 CDN 拦截
 	ua := "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
 	
-	// [修复] fmt.Sprintf 参数中补上了 keyStr
+	// [修复] 将 keyStr 正确传递给 Sprintf
 	req := fmt.Sprintf("GET %s HTTP/1.1\r\n"+
 		"Host: %s\r\n"+
 		"User-Agent: %s\r\n"+
