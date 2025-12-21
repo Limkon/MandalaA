@@ -2,7 +2,7 @@ package proxy
 
 import (
 	"io"
-	"log" // [修改] 使用 log
+	"log"
 	"net"
 	"strings"
 	"time"
@@ -21,12 +21,12 @@ func (h *Handler) HandleConnection(localConn net.Conn) {
 	defer localConn.Close()
 
 	// 1. SOCKS5 握手 (无需认证)
-	buf := make([]byte, 262) 
+	buf := make([]byte, 262)
 	if _, err := io.ReadFull(localConn, buf[:2]); err != nil {
 		return
 	}
 	if buf[0] != 0x05 {
-		return 
+		return
 	}
 	localConn.Write([]byte{0x05, 0x00})
 
@@ -41,7 +41,7 @@ func (h *Handler) HandleConnection(localConn net.Conn) {
 	var targetHost string
 	var targetPort int
 
-	if cmd != 0x01 { 
+	if cmd != 0x01 {
 		return
 	}
 
@@ -92,7 +92,8 @@ func (h *Handler) HandleConnection(localConn net.Conn) {
 
 	// 4. 发送协议头 (握手)
 	proxyType := strings.ToLower(h.Config.Type)
-	
+	isVless := false
+
 	switch proxyType {
 	case "mandala":
 		client := protocol.NewMandalaClient(h.Config.Username, h.Config.Password)
@@ -105,12 +106,38 @@ func (h *Handler) HandleConnection(localConn net.Conn) {
 			log.Printf("[Mandala] Handshake write failed: %v", err)
 			return
 		}
-		
-	case "vless", "trojan":
-		log.Println("[Proxy] Protocol not implemented yet:", proxyType)
-		return
-		
+
+	case "trojan":
+		payload, err := protocol.BuildTrojanPayload(h.Config.Password, targetHost, targetPort)
+		if err != nil {
+			log.Printf("[Trojan] Build payload failed: %v", err)
+			return
+		}
+		if _, err := remoteConn.Write(payload); err != nil {
+			log.Printf("[Trojan] Handshake write failed: %v", err)
+			return
+		}
+
+	case "vless":
+		payload, err := protocol.BuildVlessPayload(h.Config.UUID, targetHost, targetPort)
+		if err != nil {
+			log.Printf("[Vless] Build payload failed: %v", err)
+			return
+		}
+		if _, err := remoteConn.Write(payload); err != nil {
+			log.Printf("[Vless] Handshake write failed: %v", err)
+			return
+		}
+		isVless = true
+
 	default:
+		log.Println("[Proxy] Protocol not implemented:", proxyType)
+		return
+	}
+
+	// [新增] 如果是 VLESS，包装连接以剥离响应头
+	if isVless {
+		remoteConn = protocol.NewVlessConn(remoteConn)
 	}
 
 	// 5. 告知本地客户端连接成功
@@ -125,12 +152,12 @@ func (h *Handler) HandleConnection(localConn net.Conn) {
 	errChan := make(chan error, 2)
 
 	go func() {
-		_, err := io.Copy(remoteConn, localConn) 
+		_, err := io.Copy(remoteConn, localConn)
 		errChan <- err
 	}()
 
 	go func() {
-		_, err := io.Copy(localConn, remoteConn) 
+		_, err := io.Copy(localConn, remoteConn)
 		errChan <- err
 	}()
 
