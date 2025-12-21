@@ -1,7 +1,3 @@
-{
-type: uploaded file
-fileName: limkon/mandalaa/MandalaA-eb79db922dff0b83486387793a0ba34ab0d1e829/mandala-go/core/protocol/socks5.go
-fullContent:
 package protocol
 
 import (
@@ -124,4 +120,4 @@ func HandshakeSocks5(conn io.ReadWriter, username, password, targetHost string, 
 	return nil
 }
 
-}
+
