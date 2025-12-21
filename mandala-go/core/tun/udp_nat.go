@@ -1,7 +1,7 @@
 package tun
 
 import (
-	"log"
+	"fmt"
 	"net"
 	"strings"
 	"sync"
@@ -29,10 +29,7 @@ type UDPNatManager struct {
 }
 
 func NewUDPNatManager(dialer *proxy.Dialer, cfg *config.OutboundConfig) *UDPNatManager {
-	m := &UDPNatManager{
-		dialer: dialer,
-		config: cfg,
-	}
+	m := &UDPNatManager{dialer: dialer, config: cfg}
 	go m.cleanupLoop()
 	return m
 }
@@ -40,14 +37,8 @@ func NewUDPNatManager(dialer *proxy.Dialer, cfg *config.OutboundConfig) *UDPNatM
 func (m *UDPNatManager) GetOrCreate(key string, localConn *gonet.UDPConn, targetIP string, targetPort int) (*UDPSession, error) {
 	if val, ok := m.sessions.Load(key); ok {
 		session := val.(*UDPSession)
-		if session.LocalConn != localConn {
-			log.Printf("GoLog: [NAT] Session stale for %s", key)
-			session.RemoteConn.Close()
-			m.sessions.Delete(key)
-		} else {
-			session.LastActive = time.Now()
-			return session, nil
-		}
+		session.LastActive = time.Now()
+		return session, nil
 	}
 
 	remoteConn, err := m.dialer.Dial()
@@ -68,12 +59,9 @@ func (m *UDPNatManager) GetOrCreate(key string, localConn *gonet.UDPConn, target
 	case "vless":
 		payload, hErr = protocol.BuildVlessPayload(m.config.UUID, targetIP, targetPort)
 		isVless = true
-
-	// [新增] Shadowsocks
 	case "shadowsocks":
-		payload, hErr = protocol.BuildShadowsocksPayload(targetIP, targetPort)
-
-	// [新增] SOCKS5
+		// [修改] 修正握手逻辑，同步传入 Password
+		payload, hErr = protocol.BuildShadowsocksPayload(m.config.Password, targetIP, targetPort)
 	case "socks", "socks5":
 		hErr = protocol.HandshakeSocks5(remoteConn, m.config.Username, m.config.Password, targetIP, targetPort)
 	}
@@ -84,10 +72,7 @@ func (m *UDPNatManager) GetOrCreate(key string, localConn *gonet.UDPConn, target
 	}
 
 	if len(payload) > 0 {
-		if _, err := remoteConn.Write(payload); err != nil {
-			remoteConn.Close()
-			return nil, err
-		}
+		remoteConn.Write(payload)
 	}
 
 	if isVless {
@@ -102,7 +87,6 @@ func (m *UDPNatManager) GetOrCreate(key string, localConn *gonet.UDPConn, target
 
 	m.sessions.Store(key, session)
 	go m.copyRemoteToLocal(key, session)
-	log.Printf("GoLog: [NAT] Created UDP session for %s", key)
 	return session, nil
 }
 
@@ -115,13 +99,9 @@ func (m *UDPNatManager) copyRemoteToLocal(key string, s *UDPSession) {
 	for {
 		s.RemoteConn.SetReadDeadline(time.Now().Add(udpTimeout))
 		n, err := s.RemoteConn.Read(buf)
-		if err != nil {
-			return
-		}
+		if err != nil { return }
 		s.LastActive = time.Now()
-		if _, err := s.LocalConn.Write(buf[:n]); err != nil {
-			return
-		}
+		s.LocalConn.Write(buf[:n])
 	}
 }
 
