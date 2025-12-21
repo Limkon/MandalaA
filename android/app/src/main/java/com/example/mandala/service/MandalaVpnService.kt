@@ -15,6 +15,9 @@ class MandalaVpnService : VpnService() {
     companion object {
         const val ACTION_START = "com.example.mandala.service.START"
         const val ACTION_STOP = "com.example.mandala.service.STOP"
+        // [新增] 停止广播 Action
+        const val ACTION_VPN_STOPPED = "com.example.mandala.service.VPN_STOPPED"
+        
         const val EXTRA_CONFIG = "config_json"
         private const val VPN_ADDRESS = "172.16.0.1"
         private const val CHANNEL_ID = "MandalaChannel"
@@ -29,27 +32,20 @@ class MandalaVpnService : VpnService() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // [关键] 优先处理停止指令
         if (intent?.action == ACTION_STOP) {
             stopVpn()
-            // 明确告诉系统：服务停止后不要自动重启
             return START_NOT_STICKY
         }
 
-        // 立即在前台显示通知，防止被杀
         startForeground(NOTIFICATION_ID, createNotification("正在连接..."))
 
         val config = intent?.getStringExtra(EXTRA_CONFIG) ?: ""
-        
-        // [修复] 如果配置为空（通常发生在系统自动尝试重启服务时），直接停止，不尝试启动
         if (config.isEmpty()) {
             stopVpn()
             return START_NOT_STICKY
         }
 
         startVpn(config)
-        
-        // [修复] 改为 START_NOT_STICKY，防止崩溃后无限自动重启
         return START_NOT_STICKY
     }
 
@@ -75,7 +71,7 @@ class MandalaVpnService : VpnService() {
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Mandala VPN")
             .setContentText(content)
-            .setSmallIcon(android.R.drawable.ic_menu_share) 
+            .setSmallIcon(android.R.drawable.ic_menu_share)
             .setContentIntent(pendingIntent)
             .setOngoing(true)
             .build()
@@ -88,7 +84,6 @@ class MandalaVpnService : VpnService() {
                 .addRoute("0.0.0.0", 0)
                 .addRoute("::", 0)
                 .setMtu(1500)
-                // 使用 8.8.8.8，Go 核心会拦截并走代理
                 .addDnsServer("8.8.8.8")
                 .addDisallowedApplication(packageName)
                 .setSession("Mandala Core")
@@ -98,7 +93,6 @@ class MandalaVpnService : VpnService() {
                 val manager = getSystemService(NotificationManager::class.java)
                 manager.notify(NOTIFICATION_ID, createNotification("VPN 已连接"))
 
-                // 启动 Go 核心
                 val err = Mobile.startVpn(it.fd.toLong(), 1500L, configJson)
                 if (err.isNotEmpty()) {
                     stopVpn()
@@ -112,24 +106,23 @@ class MandalaVpnService : VpnService() {
 
     private fun stopVpn() {
         try {
-            // 1. 先关闭 Go 核心
             Mobile.stop()
         } catch (e: Exception) {
             e.printStackTrace()
         }
         
         try {
-            // 2. 再关闭 Java 接口
             vpnInterface?.close()
         } catch (e: Exception) {
             e.printStackTrace()
         }
         
         vpnInterface = null
-        // 移除前台通知
         stopForeground(STOP_FOREGROUND_REMOVE)
-        // 停止 Service 自身
         stopSelf()
+
+        // [关键] 发送停止广播，通知 ViewModel 更新状态
+        sendBroadcast(Intent(ACTION_VPN_STOPPED).setPackage(packageName))
     }
 
     override fun onDestroy() {
