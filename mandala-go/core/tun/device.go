@@ -1,5 +1,3 @@
-// 文件路径: mandala-go/core/tun/device.go
-
 package tun
 
 import (
@@ -21,7 +19,7 @@ type Device struct {
 func NewDevice(fd int, mtu uint32) (*Device, error) {
 	log.Printf("GoLog: [Device] Init - FD: %d, MTU: %d", fd, mtu)
 
-	// 1. 强制设置为非阻塞模式 (这对 gVisor 是必须的)
+	// 1. 强制设置为非阻塞模式
 	if err := syscall.SetNonblock(fd, true); err != nil {
 		log.Printf("GoLog: [Device] CRITICAL - Failed to set non-blocking: %v", err)
 		return nil, fmt.Errorf("set nonblock: %v", err)
@@ -37,25 +35,21 @@ func NewDevice(fd int, mtu uint32) (*Device, error) {
 }
 
 func (d *Device) LinkEndpoint() stack.LinkEndpoint {
-	// 2. 创建 Endpoint 配置
-	// Android VPN Service 创建的是 L3 TUN 设备 (纯 IP 包)
-	// 必须关闭 EthernetHeader，并强制由软件计算校验和
+	// [关键修复] 创建 Endpoint 配置
 	ep, err := fdbased.New(&fdbased.Options{
 		FDs: []int{d.fd},
 		MTU: d.mtu,
 		
-		// 关键配置组：
-		EthernetHeader:    false, // 确保是 TUN 模式而非 TAP
+		// 必须关闭 EthernetHeader，因为是 L3 TUN 设备
+		EthernetHeader: false,
 		
-		// [修复] RXChecksumOffload 必须为 true。
-		// Android 系统发给 TUN 的包可能没有计算校验和（伪头部校验和），
-		// 如果让 gVisor 去验证(false)，它会丢弃这些包，导致无法建立连接(RX=0)。
+		// [必须为 true] 告诉 gVisor 不要校验接收到的包，直接认为是有效的。
+		// Android 系统往往不计算伪头部校验和，设为 false 会导致所有入站包被丢弃(RX=0)。
 		RXChecksumOffload: true, 
-
-		// [保持] TXChecksumOffload 必须为 false。
-		// 我们需要 gVisor 在写入 TUN (发给 Android) 之前计算好校验和，
-		// 否则 Android 系统收到包后会因为校验和错误而丢弃。
-		TXChecksumOffload: false, 
+		
+		// [必须为 false] 告诉 gVisor 在发给 Android 前必须计算好校验和。
+		// Android 内核若收到校验和错误的包会丢弃。
+		TXChecksumOffload: false,
 	})
 
 	if err != nil {
@@ -63,7 +57,7 @@ func (d *Device) LinkEndpoint() stack.LinkEndpoint {
 		return nil
 	}
 
-	log.Println("GoLog: [Device] Endpoint created. RX Checksum Offload: ENABLED (Skip Verify), TX: DISABLED (Calc)")
+	log.Println("GoLog: [Device] Endpoint created. Checksum Offload Corrected.")
 	return ep
 }
 
