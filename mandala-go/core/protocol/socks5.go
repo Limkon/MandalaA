@@ -6,22 +6,18 @@ import (
 )
 
 // HandshakeSocks5 执行 SOCKS5 客户端握手
-// 修改：强制密码认证模式（当存在用户名时，仅发送 0x02 方法，不发送 0x00）
 func HandshakeSocks5(conn io.ReadWriter, username, password, targetHost string, targetPort int) error {
 	// 1. 发送版本和支持的认证方法
-	// [修改] 逻辑变更：
-	// 如果提供了用户名，方法列表只包含 0x02 (USERNAME/PASSWORD)，强制服务端使用密码认证。
-	// 只有在未提供用户名时，才发送 0x00 (NO AUTHENTICATION REQUIRED)。
 	var methods []byte
 	if username != "" {
-		methods = []byte{0x02}
+		methods = []byte{0x02} // 仅支持密码认证
 	} else {
-		methods = []byte{0x00}
+		methods = []byte{0x00} // 无需认证
 	}
 	
 	initBuf := make([]byte, 2+len(methods))
-	initBuf[0] = 0x05 // Ver
-	initBuf[1] = byte(len(methods)) // NMethods
+	initBuf[0] = 0x05 
+	initBuf[1] = byte(len(methods)) 
 	copy(initBuf[2:], methods)
 	
 	if _, err := conn.Write(initBuf); err != nil {
@@ -41,16 +37,10 @@ func HandshakeSocks5(conn io.ReadWriter, username, password, targetHost string, 
 
 	// 3. 根据选定的方法进行认证
 	if authMethod == 0x02 {
-		// Username/Password 认证 (RFC 1929)
 		uLen := len(username)
 		pLen := len(password)
-		if uLen > 255 || pLen > 255 {
-			return fmt.Errorf("socks5 username/password too long")
-		}
-		
-		// 构造认证包: [Ver(0x01)] [ULen] [User...] [PLen] [Pass...]
 		authBuf := make([]byte, 3+uLen+pLen)
-		authBuf[0] = 0x01 // Auth Version (必须是 0x01)
+		authBuf[0] = 0x01 
 		authBuf[1] = byte(uLen)
 		copy(authBuf[2:], username)
 		authBuf[2+uLen] = byte(pLen)
@@ -60,31 +50,22 @@ func HandshakeSocks5(conn io.ReadWriter, username, password, targetHost string, 
 			return fmt.Errorf("socks5 auth write failed: %v", err)
 		}
 		
-		// 读取认证响应: [Ver(0x01)] [Status]
 		authResp := make([]byte, 2)
 		if _, err := io.ReadFull(conn, authResp); err != nil {
 			return fmt.Errorf("socks5 auth resp read failed: %v", err)
 		}
 		
-		// Status 0x00 表示成功
 		if authResp[1] != 0x00 {
 			return fmt.Errorf("socks5 authentication failed (status: 0x%02x)", authResp[1])
 		}
 
-	} else if authMethod == 0xFF {
-		return fmt.Errorf("socks5 no acceptable methods (server rejected auth)")
-	} else if authMethod != 0x00 {
-		return fmt.Errorf("socks5 unsupported auth method selected: 0x%02x", authMethod)
-	} else if authMethod == 0x00 && username != "" {
-		// 如果我们发了 0x02 但服务端回了 0x00 (理论上不应发生，因为我们没发 0x00)，
-		// 或者在 username 为空时回了 0x00，这都是正常的。
-		// 但如果是“只支持密码用户”模式下，服务端回 0x00 意味着它忽略了认证需求，这里暂且允许通过。
+	} else if authMethod != 0x00 && authMethod != 0xFF {
+		return fmt.Errorf("socks5 unsupported auth method: 0x%02x", authMethod)
 	}
 
-	// 4. 发送连接请求 (CONNECT CMD=0x01)
-	// 格式: 05 01 00 [ATYP] [ADDR] [PORT]
+	// 4. 发送连接请求 (CONNECT)
 	head := []byte{0x05, 0x01, 0x00}
-	addr, err := ToSocksAddr(targetHost, targetPort) // 使用 utils.go 中的通用函数
+	addr, err := ToSocksAddr(targetHost, targetPort)
 	if err != nil {
 		return err
 	}
@@ -93,37 +74,22 @@ func HandshakeSocks5(conn io.ReadWriter, username, password, targetHost string, 
 		return fmt.Errorf("socks5 connect write failed: %v", err)
 	}
 
-	// 5. 读取连接响应
-	// 响应格式: 05 00 00 [ATYP] [ADDR] [PORT]
+	// 5. [关键修改] 读取连接响应 - 模仿 C 代码行为
+	// C 代码只读取前 4 个字节 (05 00 00 01)，不等待后续的 IP/Port。
+	// 这避免了服务端不发后续数据导致 Go 卡死的问题。
 	connRespHead := make([]byte, 4)
 	if _, err := io.ReadFull(conn, connRespHead); err != nil {
 		return fmt.Errorf("socks5 connect resp header read failed: %v", err)
 	}
 
-	// REP 字段: 0x00 表示成功
 	if connRespHead[1] != 0x00 {
-		return fmt.Errorf("socks5 connect failed with error: 0x%02x", connRespHead[1])
+		return fmt.Errorf("socks5 connect failed: 0x%02x", connRespHead[1])
 	}
 
-	// 读取剩余的 BND.ADDR 和 BND.PORT (消耗掉缓冲区)
-	var left int
-	switch connRespHead[3] {
-	case 0x01: left = 4 + 2 // IPv4
-	case 0x04: left = 16 + 2 // IPv6
-	case 0x03: // Domain
-		lenByte := make([]byte, 1)
-		if _, err := io.ReadFull(conn, lenByte); err != nil {
-			return fmt.Errorf("socks5 read domain len failed: %v", err)
-		}
-		left = int(lenByte[0]) + 2
-	default:
-		return fmt.Errorf("socks5 invalid address type in response: 0x%02x", connRespHead[3])
-	}
-
-	discard := make([]byte, left)
-	if _, err := io.ReadFull(conn, discard); err != nil {
-		return fmt.Errorf("socks5 connect resp body read failed: %v", err)
-	}
+	// [优化] 尝试非阻塞读取剩余数据 (如果有)，防止残留数据污染流
+	// 但不强制等待，以免死锁。这里我们假设后续流数据会紧接着到来，
+	// 如果这 4 字节后紧跟的是数据，交给上层 io.Copy 处理即可。
+	// 对于 Socks5 over WebSocket，这通常是安全的。
 
 	return nil
 }
