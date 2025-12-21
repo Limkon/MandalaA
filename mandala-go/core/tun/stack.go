@@ -16,8 +16,6 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
-	"gvisor.dev/gvisor/pkg/tcpip/link/fdbased" // 注意这里引用可能需要调整，视你的import而定，此文件主要是Stack逻辑
-	"gvisor.dev/gvisor/pkg/tcpip/link/sniffer"
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv6"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
@@ -59,11 +57,12 @@ func StartStack(fd int, mtu int, cfg *config.OutboundConfig) (*Stack, error) {
 		},
 	})
 
+	// 开启转发
 	s.SetForwardingDefaultAndAllNICs(ipv4.ProtocolNumber, true)
 	s.SetForwardingDefaultAndAllNICs(ipv6.ProtocolNumber, true)
 
 	nicID := tcpip.NICID(1)
-	// 如果编译报错 sniffer，可以直接用 dev.LinkEndpoint()
+	// [修复] 直接使用 device 的 endpoint，移除未使用的 sniffer
 	if err := s.CreateNIC(nicID, dev.LinkEndpoint()); err != nil {
 		dev.Close()
 		return nil, fmt.Errorf("创建网卡失败: %v", err)
@@ -114,18 +113,17 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 	}()
 
 	id := r.ID()
-	// log.Printf("[TCP] Req: %s -> %s", id.RemoteAddress, id.LocalAddress)
 	
-	// 1. 拨号代理服务器
+	// 1. 拨号代理
 	remoteConn, dialErr := s.dialer.Dial()
 	if dialErr != nil {
-		log.Printf("[TCP] 拨号代理失败: %v", dialErr)
+		log.Printf("[TCP] Dial失败: %v", dialErr)
 		r.Complete(true)
 		return
 	}
 	defer remoteConn.Close()
 
-	// 2. 发送握手
+	// 2. 握手
 	var payload []byte
 	var hErr error
 	targetHost := id.LocalAddress.String()
@@ -142,7 +140,6 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 	}
 
 	if hErr != nil {
-		log.Printf("[TCP] 握手包构建失败: %v", hErr)
 		r.Complete(true)
 		return
 	}
@@ -166,14 +163,12 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 	localConn := gonet.NewTCPConn(&wq, ep)
 	defer localConn.Close()
 
-	// 4. 双向转发
+	// 4. 转发
 	go func() {
-		// Remote -> Local
 		io.Copy(localConn, remoteConn)
 		localConn.CloseWrite()
 	}()
 
-	// Local -> Remote
 	io.Copy(remoteConn, localConn)
 }
 
@@ -181,22 +176,48 @@ func (s *Stack) handleUDP(r *udp.ForwarderRequest) {
 	id := r.ID()
 	targetPort := int(id.LocalPort)
 
-	// [修复] 拦截 DNS 请求，并通过代理转发 (Remote DNS)
+	// [修复] 拦截 DNS 请求 (端口 53)
 	if targetPort == 53 {
 		var wq waiter.Queue
 		ep, err := r.CreateEndpoint(&wq)
 		if err != nil { return }
 		localConn := gonet.NewUDPConn(s.stack, &wq, ep)
-		go s.handleRemoteDNS(localConn) // 使用新的 RemoteDNS 处理
+		
+		// 这里的处理函数已改为 RemoteDNS，不再使用 net.Dial
+		go s.handleRemoteDNS(localConn)
 		return
 	}
 
-	// [注意] 普通 UDP 流量 (QUIC等) 在此实现中因协议不支持 UDP over TCP Stream 可能会失效。
-	// 建议暂时忽略或仅在支持 Mux 的协议中开启。
-	// 下方代码保持原样，防止改动过大，但已知存在 UDP 兼容性问题。
+	// 这里的 net.IP 使用确保了 net 包被引用，避免 "imported and not used"
+	targetIP := net.IP(id.LocalAddress.AsSlice()).String()
+	srcKey := fmt.Sprintf("%s:%d->%s:%d", id.RemoteAddress.String(), id.RemotePort, targetIP, targetPort)
+
+	var wq waiter.Queue
+	ep, err := r.CreateEndpoint(&wq)
+	if err != nil { return }
+
+	localConn := gonet.NewUDPConn(s.stack, &wq, ep)
+	
+	// UDP NAT 逻辑
+	session, natErr := s.nat.GetOrCreate(srcKey, localConn, targetIP, targetPort)
+	if natErr != nil {
+		localConn.Close()
+		return
+	}
+
+	go func() {
+		defer localConn.Close()
+		buf := make([]byte, 4096)
+		for {
+			localConn.SetDeadline(time.Now().Add(60 * time.Second))
+			n, rErr := localConn.Read(buf)
+			if rErr != nil { return }
+			if _, wErr := session.RemoteConn.Write(buf[:n]); wErr != nil { return }
+		}
+	}()
 }
 
-// [新增] handleRemoteDNS 将 UDP DNS 请求封装为 TCP 格式，通过代理发送到 8.8.8.8
+// [修复] 通过代理转发 DNS，而不是直接连接
 func (s *Stack) handleRemoteDNS(conn *gonet.UDPConn) {
 	defer conn.Close()
 	conn.SetDeadline(time.Now().Add(5 * time.Second))
@@ -205,16 +226,15 @@ func (s *Stack) handleRemoteDNS(conn *gonet.UDPConn) {
 	n, err := conn.Read(buf)
 	if err != nil { return }
 
-	// 1. 连接代理服务器
+	// 1. 连接代理
 	proxyConn, err := s.dialer.Dial()
 	if err != nil {
-		log.Printf("[DNS] 连代理失败: %v", err)
+		log.Printf("[DNS] 代理连接失败: %v", err)
 		return
 	}
 	defer proxyConn.Close()
 
-	// 2. 通过代理握手连接到 8.8.8.8:53
-	// 这样 DNS 请求就会走 VPN 通道，而不是本地网络
+	// 2. 发送握手 (连接到 8.8.8.8:53)
 	var payload []byte
 	switch strings.ToLower(s.config.Type) {
 	case "mandala":
@@ -228,7 +248,7 @@ func (s *Stack) handleRemoteDNS(conn *gonet.UDPConn) {
 	
 	if _, err := proxyConn.Write(payload); err != nil { return }
 
-	// 3. 发送 DNS 请求 (封装为 TCP 格式: 2字节长度 + 数据)
+	// 3. 封装 DNS 请求为 TCP (2字节长度 + 数据)
 	reqData := make([]byte, 2+n)
 	reqData[0] = byte(n >> 8)
 	reqData[1] = byte(n)
@@ -246,7 +266,7 @@ func (s *Stack) handleRemoteDNS(conn *gonet.UDPConn) {
 
 	// 5. 写回 Android
 	conn.Write(respBuf)
-	log.Printf("[DNS] 解析成功 (via 8.8.8.8)")
+	log.Printf("[DNS] 代理解析成功")
 }
 
 func (s *Stack) Close() {
