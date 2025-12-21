@@ -57,6 +57,8 @@ func (m *UDPNatManager) GetOrCreate(key string, localConn *gonet.UDPConn, target
 
 	var payload []byte
 	var hErr error
+	isVless := false
+
 	switch strings.ToLower(m.config.Type) {
 	case "mandala":
 		client := protocol.NewMandalaClient(m.config.Username, m.config.Password)
@@ -65,6 +67,7 @@ func (m *UDPNatManager) GetOrCreate(key string, localConn *gonet.UDPConn, target
 		payload, hErr = protocol.BuildTrojanPayload(m.config.Password, targetIP, targetPort)
 	case "vless":
 		payload, hErr = protocol.BuildVlessPayload(m.config.UUID, targetIP, targetPort)
+		isVless = true
 	}
 
 	if hErr != nil {
@@ -77,6 +80,11 @@ func (m *UDPNatManager) GetOrCreate(key string, localConn *gonet.UDPConn, target
 			remoteConn.Close()
 			return nil, err
 		}
+	}
+
+	// [新增] 如果是 VLESS，包装连接以剥离响应头
+	if isVless {
+		remoteConn = protocol.NewVlessConn(remoteConn)
 	}
 
 	session := &UDPSession{
@@ -100,9 +108,13 @@ func (m *UDPNatManager) copyRemoteToLocal(key string, s *UDPSession) {
 	for {
 		s.RemoteConn.SetReadDeadline(time.Now().Add(udpTimeout))
 		n, err := s.RemoteConn.Read(buf)
-		if err != nil { return }
+		if err != nil {
+			return
+		}
 		s.LastActive = time.Now()
-		if _, err := s.LocalConn.Write(buf[:n]); err != nil { return }
+		if _, err := s.LocalConn.Write(buf[:n]); err != nil {
+			return
+		}
 	}
 }
 
