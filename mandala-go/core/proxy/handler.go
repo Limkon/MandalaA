@@ -130,12 +130,32 @@ func (h *Handler) HandleConnection(localConn net.Conn) {
 		}
 		isVless = true
 
+	// [新增] Shadowsocks 支持
+	case "shadowsocks":
+		payload, err := protocol.BuildShadowsocksPayload(targetHost, targetPort)
+		if err != nil {
+			log.Printf("[Shadowsocks] Build payload failed: %v", err)
+			return
+		}
+		if _, err := remoteConn.Write(payload); err != nil {
+			log.Printf("[Shadowsocks] Handshake write failed: %v", err)
+			return
+		}
+
+	// [新增] SOCKS5 支持 (含认证)
+	case "socks", "socks5":
+		err := protocol.HandshakeSocks5(remoteConn, h.Config.Username, h.Config.Password, targetHost, targetPort)
+		if err != nil {
+			log.Printf("[Socks5] Handshake failed: %v", err)
+			return
+		}
+
 	default:
 		log.Println("[Proxy] Protocol not implemented:", proxyType)
 		return
 	}
 
-	// [新增] 如果是 VLESS，包装连接以剥离响应头
+	// 如果是 VLESS，包装连接以剥离响应头
 	if isVless {
 		remoteConn = protocol.NewVlessConn(remoteConn)
 	}
