@@ -10,11 +10,28 @@ import com.google.gson.JsonObject
 import java.nio.charset.StandardCharsets
 
 object NodeParser {
+    
+    // [新增] 批量解析方法
+    fun parseList(text: String): List<Node> {
+        val nodes = mutableListOf<Node>()
+        // 使用正则按空白字符（换行、空格、制表符）分割
+        val lines = text.split("\\s+".toRegex())
+        
+        for (line in lines) {
+            if (line.isNotBlank()) {
+                // 尝试解析每一行
+                parse(line)?.let { nodes.add(it) }
+            }
+        }
+        return nodes
+    }
+
     fun parse(link: String): Node? {
+        // 这里的 replace 会移除行内的换行符，对于单行链接是安全的
+        // 但对于多行文本，必须先由 parseList 分割
         val trimmed = link.trim().replace("\n", "").replace("\r", "")
         return try {
             when {
-                // 增加 mandala:// 协议识别
                 trimmed.startsWith("mandala://", ignoreCase = true) -> parseMandala(trimmed)
                 trimmed.startsWith("vmess://", ignoreCase = true) -> parseVmess(trimmed)
                 trimmed.startsWith("vless://", ignoreCase = true) -> parseVless(trimmed)
@@ -26,7 +43,6 @@ object NodeParser {
         }
     }
 
-    // 新增：解析 mandala:// 协议
     private fun parseMandala(link: String): Node? {
         val uri = Uri.parse(link)
         val host = uri.host ?: return null
@@ -36,10 +52,8 @@ object NodeParser {
             protocol = "mandala",
             server = host,
             port = if (uri.port > 0) uri.port else 443,
-            // 提取 @ 前面的部分作为密码
             password = uri.userInfo?.let { Uri.decode(it) } ?: "",
             transport = if (uri.getQueryParameter("type") == "ws") "ws" else "tcp",
-            // 路径需要进行 URL 解码处理
             path = uri.getQueryParameter("path")?.let { Uri.decode(it) } ?: "/",
             sni = uri.getQueryParameter("sni") ?: ""
         )
@@ -73,7 +87,7 @@ object NodeParser {
 
         return Node(
             tag = json.get("ps")?.asString?.let { Uri.decode(it) } ?: "未命名VMess",
-            protocol = "vless", 
+            protocol = "vless", // 注意：VMess 在此项目中映射为 Vless 处理 (根据原有代码逻辑)
             server = json.get("add")?.asString ?: return null,
             port = port,
             uuid = json.get("id")?.asString ?: "",
