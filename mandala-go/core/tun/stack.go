@@ -65,14 +65,12 @@ func StartStack(fd int, mtu int, cfg *config.OutboundConfig) (*Stack, error) {
 
 	nicID := tcpip.NICID(1)
 
-	// [修复] 直接使用 dev.LinkEndpoint()
 	if err := s.CreateNIC(nicID, dev.LinkEndpoint()); err != nil {
 		dev.Close()
 		return nil, fmt.Errorf("创建网卡失败: %v", err)
 	}
 
-	// [关键修复] 开启 IP 欺骗 (Spoofing)
-	// Android VPN 接口收到的包源 IP 是公网 IP，必须允许 Spoofing，否则 gVisor 会丢弃这些包导致 RX=0
+	// 开启 IP 欺骗 (Spoofing)
 	s.SetPromiscuousMode(nicID, true)
 	s.SetSpoofing(nicID, true)
 
@@ -135,6 +133,9 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 	targetHost := id.LocalAddress.String()
 	targetPort := int(id.LocalPort)
 
+	// 标记是否需要 VLESS 响应处理
+	isVless := false
+
 	switch strings.ToLower(s.config.Type) {
 	case "mandala":
 		client := protocol.NewMandalaClient(s.config.Username, s.config.Password)
@@ -143,6 +144,7 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 		payload, hErr = protocol.BuildTrojanPayload(s.config.Password, targetHost, targetPort)
 	case "vless":
 		payload, hErr = protocol.BuildVlessPayload(s.config.UUID, targetHost, targetPort)
+		isVless = true
 	}
 
 	if hErr != nil {
@@ -155,6 +157,11 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 			r.Complete(true)
 			return
 		}
+	}
+
+	// [新增] 如果是 VLESS，包装连接以剥离响应头
+	if isVless {
+		remoteConn = protocol.NewVlessConn(remoteConn)
 	}
 
 	// 3. 建立本地连接
@@ -194,7 +201,6 @@ func (s *Stack) handleUDP(r *udp.ForwarderRequest) {
 		return
 	}
 
-	// [关键] 使用 net.IP 确保 net 包被引用，避免 "imported and not used"
 	targetIP := net.IP(id.LocalAddress.AsSlice()).String()
 	srcKey := fmt.Sprintf("%s:%d->%s:%d", id.RemoteAddress.String(), id.RemotePort, targetIP, targetPort)
 
@@ -250,6 +256,8 @@ func (s *Stack) handleRemoteDNS(conn *gonet.UDPConn) {
 
 	// 2. 发送握手 (固定转发到 8.8.8.8)
 	var payload []byte
+	isVless := false
+
 	switch strings.ToLower(s.config.Type) {
 	case "mandala":
 		client := protocol.NewMandalaClient(s.config.Username, s.config.Password)
@@ -258,10 +266,17 @@ func (s *Stack) handleRemoteDNS(conn *gonet.UDPConn) {
 		payload, _ = protocol.BuildTrojanPayload(s.config.Password, "8.8.8.8", 53)
 	case "vless":
 		payload, _ = protocol.BuildVlessPayload(s.config.UUID, "8.8.8.8", 53)
+		isVless = true
 	}
 
 	if _, err := proxyConn.Write(payload); err != nil {
 		return
+	}
+
+	// 如果是 VLESS DNS 连接，也需要包装以剥离响应头
+	if isVless {
+		// 注意：此处 proxyConn 是 net.Conn 接口，需要 reassignment
+		proxyConn = protocol.NewVlessConn(proxyConn)
 	}
 
 	// 3. 封装 DNS (2字节长度 + 数据)
@@ -291,28 +306,22 @@ func (s *Stack) handleRemoteDNS(conn *gonet.UDPConn) {
 	log.Printf("[DNS] 解析完成")
 }
 
-// [修改] 移除 CloseNIC，修复编译错误
 func (s *Stack) Close() {
 	s.closeOnce.Do(func() {
 		log.Println("[Stack] Stopping...")
 
-		// 1. 取消 Context
 		if s.cancel != nil {
 			s.cancel()
 		}
 
-		// 2. 等待资源释放
 		time.Sleep(100 * time.Millisecond)
 
-		// 3. 关闭文件描述符
 		if s.device != nil {
 			s.device.Close()
 		}
 
-		// 4. 关闭协议栈
 		if s.stack != nil {
-			// s.stack.CloseNIC(1) // [删除] 此行导致编译错误
-			s.stack.Close() // 保留此行
+			s.stack.Close()
 		}
 
 		log.Println("[Stack] Stopped.")
