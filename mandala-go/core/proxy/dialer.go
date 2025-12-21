@@ -2,22 +2,18 @@ package proxy
 
 import (
 	"bufio"
+	"crypto/rand" // [修复] 使用 crypto/rand 生成真随机数
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/binary"
 	"fmt"
 	"io"
-	"math/rand"
 	"net"
 	"net/http"
 	"time"
 
 	"mandala/core/config"
 )
-
-func init() {
-	rand.Seed(time.Now().UnixNano())
-}
 
 type Dialer struct {
 	Config *config.OutboundConfig
@@ -34,7 +30,6 @@ func (d *Dialer) Dial() (net.Conn, error) {
 		return nil, err
 	}
 
-	// [修复] 启用 TCP KeepAlive，防止移动网络下连接假死
 	if tcpConn, ok := conn.(*net.TCPConn); ok {
 		tcpConn.SetKeepAlive(true)
 		tcpConn.SetKeepAlivePeriod(15 * time.Second)
@@ -83,8 +78,6 @@ func (d *Dialer) handshakeWebSocket(conn net.Conn) (net.Conn, error) {
 	rand.Read(key)
 	keyStr := base64.StdEncoding.EncodeToString(key)
 
-	// [关键修复] 添加 User-Agent。
-	// 很多 CDN 和服务端（如 C 版本 proxy.c）会检查或记录 UA，缺失可能导致连接被阻断。
 	req := fmt.Sprintf("GET %s HTTP/1.1\r\n"+
 		"Host: %s\r\n"+
 		"User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36\r\n"+
@@ -131,7 +124,7 @@ func (w *WSConn) Write(b []byte) (int, error) {
 	if length == 0 { return 0, nil }
 
 	buf := make([]byte, 0, 14+length)
-	buf = append(buf, 0x82) // Binary Frame
+	buf = append(buf, 0x82)
 
 	if length < 126 {
 		buf = append(buf, byte(length)|0x80)
@@ -144,7 +137,7 @@ func (w *WSConn) Write(b []byte) (int, error) {
 	}
 
 	maskKey := make([]byte, 4)
-	rand.Read(maskKey)
+	rand.Read(maskKey) // 使用 crypto/rand
 	buf = append(buf, maskKey...)
 
 	payloadStart := len(buf)
@@ -191,7 +184,6 @@ func (w *WSConn) Read(b []byte) (int, error) {
 		}
 
 		if masked {
-			// 如果服务端发来 Mask 数据，跳过 Key 并继续（虽然不符合 RFC，但作为客户端兼容处理）
 			if _, err := io.ReadFull(w.reader, make([]byte, 4)); err != nil { return 0, err }
 		}
 
