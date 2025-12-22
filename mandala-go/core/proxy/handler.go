@@ -155,41 +155,62 @@ func (h *Handler) HandleConnection(localConn net.Conn) {
 		return
 	}
 
-	// 6. 双向转发（关键修改：防止碎片化）
+	// 6. 双向转发 (优化版：处理半关闭，防止接收数据中断)
 	localConn.SetDeadline(time.Time{})
 	remoteConn.SetDeadline(time.Time{})
 
-	// 优化：设置 TCP NoDelay 和 MSS，限制缓冲大小
+	// 优化 TCP 参数：开启 NoDelay 和 KeepAlive
 	if tcpl, ok := localConn.(*net.TCPConn); ok {
 		tcpl.SetNoDelay(true)
+		tcpl.SetKeepAlive(true)
+		tcpl.SetKeepAlivePeriod(30 * time.Second)
 	}
 	if tcpr, ok := remoteConn.(*net.TCPConn); ok {
 		tcpr.SetNoDelay(true)
-		// 设置 TCP MSS = 1360（对应 MTU 1400），防止碎片
+		tcpr.SetKeepAlive(true)
+		tcpr.SetKeepAlivePeriod(30 * time.Second)
+		// 尝试设置 MSS 防止碎片 (可选)
 		if f, err := tcpr.File(); err == nil {
 			_ = syscall.SetsockoptInt(int(f.Fd()), syscall.IPPROTO_TCP, syscall.TCP_MAXSEG, 1360)
 		}
 	}
 
-	// 使用固定小缓冲区
-	buf := make([]byte, 1400)
+	// 使用通道等待两个方向的传输完成
+	done := make(chan struct{}, 2)
 
-	errChan := make(chan error, 2)
+	// 上行：Local -> Remote (上传)
 	go func() {
-		_, err := io.CopyBuffer(remoteConn, localConn, buf)
-		errChan <- err
-	}()
-	go func() {
-		_, err := io.CopyBuffer(localConn, remoteConn, buf)
-		errChan <- err
+		// io.Copy 内部会自动使用较大的缓冲区 (32KB)，比手动循环更高效
+		io.Copy(remoteConn, localConn)
+		
+		// 发送完数据后，尝试给远程发 FIN (TCP Half-Close)，但不直接关闭连接
+		// 这样远程服务器知道我们发完了，但我们还可以继续接收它的响应
+		if tcpRemote, ok := remoteConn.(*net.TCPConn); ok {
+			tcpRemote.CloseWrite()
+		} else if cw, ok := remoteConn.(interface{ CloseWrite() error }); ok {
+			// 兼容其他实现了 CloseWrite 的连接类型
+			cw.CloseWrite()
+		}
+		done <- struct{}{}
 	}()
 
-	// 等待任一方向结束
-	err = <-errChan
-	if err != nil && err != io.EOF {
-		log.Printf("[Proxy] Relay error: %v", err)
-	}
-	// 关闭连接
+	// 下行：Remote -> Local (下载)
+	go func() {
+		io.Copy(localConn, remoteConn)
+		
+		// 接收完数据后，尝试给本地发 FIN
+		if tcpLocal, ok := localConn.(*net.TCPConn); ok {
+			tcpLocal.CloseWrite()
+		}
+		done <- struct{}{}
+	}()
+
+	// 等待两个方向全部完成，或者任何一方发生错误导致 io.Copy 退出
+	// 必须等待两次，确保双向数据都已处理完毕
+	<-done
+	<-done
+
+	// 全部结束，安全关闭连接
 	localConn.Close()
 	remoteConn.Close()
 }
