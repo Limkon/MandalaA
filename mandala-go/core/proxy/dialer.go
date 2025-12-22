@@ -10,6 +10,7 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
+	"sync" // 引入 sync 用于锁
 	"time"
 
 	"mandala/core/config"
@@ -30,10 +31,10 @@ func NewDialer(cfg *config.OutboundConfig) *Dialer {
 func (d *Dialer) Dial() (net.Conn, error) {
 	targetAddr := fmt.Sprintf("%s:%d", d.Config.Server, d.Config.ServerPort)
 
-	// 使用更底层的 Dialer 来配置 KeepAlive
+	// 使用更底层的 Dialer
 	dialer := &net.Dialer{
 		Timeout:   5 * time.Second,
-		KeepAlive: 30 * time.Second, // 30秒发送一次心跳，防止死连接
+		KeepAlive: 30 * time.Second,
 	}
 
 	conn, err := dialer.Dial("tcp", targetAddr)
@@ -41,12 +42,9 @@ func (d *Dialer) Dial() (net.Conn, error) {
 		return nil, err
 	}
 
-	// 开启 TCP NoDelay，减少延迟
 	if tcpConn, ok := conn.(*net.TCPConn); ok {
 		tcpConn.SetNoDelay(true)
-		// [修复] 移除 SetLinger(0) 或设置为 -1 (默认)。
-		// SetLinger(0) 会导致 Close() 时直接丢弃缓冲区未发出的数据并发送 RST，
-		// 这在网络拥堵或高延迟时极易导致数据传输不完整。
+		// [保持] 移除 SetLinger(0)，使用默认优雅关闭
 		tcpConn.SetLinger(-1)
 	}
 
@@ -130,23 +128,24 @@ type WSConn struct {
 	net.Conn
 	reader    *bufio.Reader
 	remaining int64
+	writeMu   sync.Mutex // 增加写锁，防止 Read 里的自动 Pong 和 Write 冲突
 }
 
 func NewWSConn(c net.Conn, br *bufio.Reader) *WSConn {
 	return &WSConn{Conn: c, reader: br, remaining: 0}
 }
 
-func (w *WSConn) Write(b []byte) (int, error) {
-	length := len(b)
-	if length == 0 {
-		return 0, nil
-	}
+// writeFrame 封装帧发送逻辑
+func (w *WSConn) writeFrame(opcode byte, payload []byte) (int, error) {
+	w.writeMu.Lock()
+	defer w.writeMu.Unlock()
 
+	length := len(payload)
 	buf := make([]byte, 0, 14+length)
-	buf = append(buf, 0x82) // Binary Frame
+	buf = append(buf, 0x80|opcode) // FIN=1 + Opcode
 
 	if length < 126 {
-		buf = append(buf, byte(length)|0x80)
+		buf = append(buf, byte(length)|0x80) // Mask bit set
 	} else if length <= 65535 {
 		buf = append(buf, 126|0x80)
 		buf = binary.BigEndian.AppendUint16(buf, uint16(length))
@@ -160,7 +159,7 @@ func (w *WSConn) Write(b []byte) (int, error) {
 	buf = append(buf, maskKey...)
 
 	payloadStart := len(buf)
-	buf = append(buf, b...)
+	buf = append(buf, payload...)
 
 	for i := 0; i < length; i++ {
 		buf[payloadStart+i] ^= maskKey[i%4]
@@ -170,6 +169,11 @@ func (w *WSConn) Write(b []byte) (int, error) {
 		return 0, err
 	}
 	return length, nil
+}
+
+func (w *WSConn) Write(b []byte) (int, error) {
+	// 0x2 = Binary Frame
+	return w.writeFrame(0x02, b)
 }
 
 func (w *WSConn) Read(b []byte) (int, error) {
@@ -223,19 +227,34 @@ func (w *WSConn) Read(b []byte) (int, error) {
 		}
 
 		switch opcode {
-		case 0x8:
+		case 0x8: // Close
 			return 0, io.EOF
-		case 0x9, 0xA:
+		case 0x9: // Ping
+			// [修复] 收到 Ping 必须回复 Pong，且携带相同的 Payload
+			pingPayload := make([]byte, payloadLen)
+			if payloadLen > 0 {
+				if _, err := io.ReadFull(w.reader, pingPayload); err != nil {
+					return 0, err
+				}
+			}
+			// 发送 Pong (Opcode 0xA)
+			if _, err := w.writeFrame(0x0A, pingPayload); err != nil {
+				return 0, err
+			}
+			continue
+		case 0xA: // Pong
+			// 忽略 Pong，但需丢弃数据
 			if payloadLen > 0 {
 				io.CopyN(io.Discard, w.reader, payloadLen)
 			}
 			continue
-		case 0x0, 0x1, 0x2:
+		case 0x0, 0x1, 0x2: // Data Frames
 			w.remaining = payloadLen
 			if w.remaining == 0 {
 				continue
 			}
 		default:
+			// 未知帧，丢弃
 			if payloadLen > 0 {
 				io.CopyN(io.Discard, w.reader, payloadLen)
 			}
