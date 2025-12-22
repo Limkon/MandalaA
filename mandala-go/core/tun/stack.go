@@ -41,7 +41,7 @@ type Stack struct {
 }
 
 func StartStack(fd int, mtu int, cfg *config.OutboundConfig) (*Stack, error) {
-	log.Printf("[Stack] 启动中 (FD: %d, MTU: %d, Type: %s)", fd, mtu, cfg.Type)
+	log.Printf("[Stack] 啟動中 (FD: %d, MTU: %d, Type: %s)", fd, mtu, cfg.Type)
 
 	dev, err := NewDevice(fd, uint32(mtu))
 	if err != nil {
@@ -65,7 +65,7 @@ func StartStack(fd int, mtu int, cfg *config.OutboundConfig) (*Stack, error) {
 	nicID := tcpip.NICID(1)
 	if err := s.CreateNIC(nicID, dev.LinkEndpoint()); err != nil {
 		dev.Close()
-		return nil, fmt.Errorf("创建网卡失败: %v", err)
+		return nil, fmt.Errorf("創建網卡失敗: %v", err)
 	}
 
 	s.SetPromiscuousMode(nicID, true)
@@ -141,7 +141,6 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 		payload, hErr = protocol.BuildVlessPayload(s.config.UUID, targetHost, targetPort)
 	case "shadowsocks":
 		payload, hErr = protocol.BuildShadowsocksPayload(targetHost, targetPort)
-		// Shadowsocks 某些实现（如 Cloudflare Worker）可能返回少量响应头，我们稍后统一处理
 	case "socks", "socks5":
 		hErr = protocol.HandshakeSocks5(remoteConn, s.config.Username, s.config.Password, targetHost, targetPort)
 	}
@@ -152,7 +151,6 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 		return
 	}
 
-	// 发送握手 payload（如果有）
 	if len(payload) > 0 {
 		if _, err := remoteConn.Write(payload); err != nil {
 			log.Printf("[TCP] Write payload failed: %v", err)
@@ -161,16 +159,13 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 		}
 	}
 
-	// 协议特定的响应头剥离
 	switch strings.ToLower(s.config.Type) {
 	case "vless":
 		if !isWebSocket {
 			remoteConn = protocol.NewVlessConn(remoteConn)
 		}
 	case "socks", "socks5":
-		// HandshakeSocks5 已经完整读取并验证了响应，无需额外处理
 	case "shadowsocks":
-		// 主动读取并丢弃可能的预响应（某些实现会发 0-几百字节）
 		buf := make([]byte, 1024)
 		remoteConn.SetReadDeadline(time.Now().Add(3 * time.Second))
 		n, _ := remoteConn.Read(buf)
@@ -179,10 +174,8 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 		}
 		remoteConn.SetReadDeadline(time.Time{})
 	default:
-		// 其他协议（如 mandala/trojan）无响应头
 	}
 
-	// 创建 gVisor 端的本地连接
 	var wq waiter.Queue
 	ep, err := r.CreateEndpoint(&wq)
 	if err != nil {
@@ -194,11 +187,9 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 	localConn := gonet.NewTCPConn(&wq, ep)
 	defer localConn.Close()
 
-	// 双向转发
 	var wg sync.WaitGroup
 	wg.Add(2)
 
-	// 上行：App -> Remote
 	go func() {
 		defer wg.Done()
 		n, err := io.Copy(remoteConn, localConn)
@@ -208,7 +199,6 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 		}
 	}()
 
-	// 下行：Remote -> App
 	go func() {
 		defer wg.Done()
 		n, err := io.Copy(localConn, remoteConn)
@@ -216,10 +206,7 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 		localConn.CloseWrite()
 	}()
 
-	// 等待上传和下载都完成
 	wg.Wait()
-
-	// 通知 gVisor 连接已完成
 	r.Complete(false)
 }
 
@@ -233,7 +220,8 @@ func (s *Stack) handleUDP(r *udp.ForwarderRequest) {
 		if err != nil {
 			return
 		}
-		localConn := gonet.NewUDPConn(&wq, ep)
+		// [修復] 恢復為 3 個參數，加入 s.stack
+		localConn := gonet.NewUDPConn(s.stack, &wq, ep)
 		go s.handleRemoteDNS(localConn)
 		return
 	}
@@ -247,7 +235,8 @@ func (s *Stack) handleUDP(r *udp.ForwarderRequest) {
 		return
 	}
 
-	localConn := gonet.NewUDPConn(&wq, ep)
+	// [修復] 恢復為 3 個參數，加入 s.stack
+	localConn := gonet.NewUDPConn(s.stack, &wq, ep)
 
 	session, natErr := s.nat.GetOrCreate(srcKey, localConn, targetIP, targetPort)
 	if natErr != nil {
