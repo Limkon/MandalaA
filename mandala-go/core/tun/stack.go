@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log"
-	// [修复] 删除未使用的 "net" 包
+	// [修复] 此处无需显式引入 "net"，我们使用 interface 断言来避免依赖
 	"strings"
 	"sync"
 	"time"
@@ -161,7 +161,7 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 		remoteConn = protocol.NewVlessConn(remoteConn)
 	}
 
-	// 3. 建立本地连接
+	// 3. 建立本地连接 (TUN -> gVisor)
 	var wq waiter.Queue
 	ep, err := r.CreateEndpoint(&wq)
 	if err != nil {
@@ -173,13 +173,42 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 	localConn := gonet.NewTCPConn(&wq, ep)
 	defer localConn.Close()
 
-	// 4. 双向转发
+	// 4. 双向转发 (修复版：双向等待，防止单侧结束导致连接中断)
+	done := make(chan struct{}, 2)
+
+	// 下行：Remote -> Local (下载)
 	go func() {
+		// 使用 io.Copy 自动处理缓冲
 		io.Copy(localConn, remoteConn)
-		localConn.CloseWrite()
+		
+		// 尝试发送 FIN 给本地 (gonet.TCPConn 支持 CloseWrite)
+		if tcpLocal, ok := localConn.(*gonet.TCPConn); ok {
+			tcpLocal.CloseWrite()
+		}
+		done <- struct{}{}
 	}()
 
-	io.Copy(remoteConn, localConn)
+	// 上行：Local -> Remote (上传)
+	go func() {
+		io.Copy(remoteConn, localConn)
+		
+		// 尝试发送 FIN 给远程
+		// 这里的 interface 断言避免了必须引入 "net" 包的依赖，
+		// 同时能兼容 *net.TCPConn 或其他支持 CloseWrite 的连接
+		if cw, ok := remoteConn.(interface{ CloseWrite() error }); ok {
+			cw.CloseWrite()
+		}
+		done <- struct{}{}
+	}()
+
+	// 等待两个方向全部结束
+	// 关键逻辑：只要有一方结束（通常是上传先结束），不能立即 Close，必须等另一方（下载）也结束
+	<-done
+	<-done
+
+	// 清理资源
+	localConn.Close()
+	remoteConn.Close()
 }
 
 // handleUDP 处理 UDP 流量
