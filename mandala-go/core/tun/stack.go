@@ -48,6 +48,7 @@ func StartStack(fd int, mtu int, cfg *config.OutboundConfig) (*Stack, error) {
 		return nil, err
 	}
 
+	// 1. 创建协议栈
 	s := stack.New(stack.Options{
 		NetworkProtocols: []stack.NetworkProtocolFactory{
 			ipv4.NewProtocol,
@@ -59,11 +60,31 @@ func StartStack(fd int, mtu int, cfg *config.OutboundConfig) (*Stack, error) {
 		},
 	})
 
+	// [关键修复] 配置 TCP 协议栈选项
+	// 启用 SACK (Selective Acknowledgment) 以提高丢包环境下的性能
+	sackOpt := tcp.SACKEnabled(true)
+	if err := s.SetTransportProtocolOption(tcp.ProtocolNumber, &sackOpt); err != nil {
+		log.Printf("[Stack] Warning: Failed to enable SACK: %v", err)
+	}
+
+	// [关键修复] 增大默认发送缓冲区 (控制 Download 速度: Stack -> App)
+	// 默认值可能太小，导致从代理接收的数据无法及时写入 TUN，导致下载慢/断流
+	sndBufOpt := tcp.SendBufferSizeOption(2 * 1024 * 1024) // 2MB
+	if err := s.SetTransportProtocolOption(tcp.ProtocolNumber, &sndBufOpt); err != nil {
+		log.Printf("[Stack] Warning: Failed to set SendBufferSize: %v", err)
+	}
+
+	// [关键修复] 增大默认接收缓冲区 (控制 Upload 速度: App -> Stack)
+	rcvBufOpt := tcp.ReceiveBufferSizeOption(2 * 1024 * 1024) // 2MB
+	if err := s.SetTransportProtocolOption(tcp.ProtocolNumber, &rcvBufOpt); err != nil {
+		log.Printf("[Stack] Warning: Failed to set ReceiveBufferSize: %v", err)
+	}
+
+	// 2. 配置网卡
 	s.SetForwardingDefaultAndAllNICs(ipv4.ProtocolNumber, true)
 	s.SetForwardingDefaultAndAllNICs(ipv6.ProtocolNumber, true)
 
 	nicID := tcpip.NICID(1)
-
 	if err := s.CreateNIC(nicID, dev.LinkEndpoint()); err != nil {
 		dev.Close()
 		return nil, fmt.Errorf("创建网卡失败: %v", err)
@@ -95,10 +116,10 @@ func StartStack(fd int, mtu int, cfg *config.OutboundConfig) (*Stack, error) {
 }
 
 func (s *Stack) startPacketHandling() {
-	// [修复关键点]
-	// 1. rcvWnd (接收窗口): 从 30000 增加到 1MB (1<<20)。解决断流和速度慢的问题。
-	// 2. maxInFlight (最大并发): 从 10 增加到 2048。解决 SOCKS5 握手慢导致的并发连接被拒问题。
-	rcvWnd := 1 << 20 // 1MB
+	// [之前修复]
+	// rcvWnd: 1MB (通告窗口大小)
+	// maxInFlight: 2048 (最大并发握手)
+	rcvWnd := 1 << 20
 	maxInFlight := 2048
 
 	tcpHandler := tcp.NewForwarder(s.stack, rcvWnd, maxInFlight, func(r *tcp.ForwarderRequest) {
@@ -145,12 +166,8 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 	case "vless":
 		payload, hErr = protocol.BuildVlessPayload(s.config.UUID, targetHost, targetPort)
 		isVless = true
-
-	// [新增] Shadowsocks
 	case "shadowsocks":
 		payload, hErr = protocol.BuildShadowsocksPayload(targetHost, targetPort)
-
-	// [新增] SOCKS5 (交互式握手，无 Payload 生成)
 	case "socks", "socks5":
 		hErr = protocol.HandshakeSocks5(remoteConn, s.config.Username, s.config.Password, targetHost, targetPort)
 	}
@@ -160,7 +177,6 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 		return
 	}
 
-	// 发送握手包 (适用于 Mandala, Trojan, Vless, Shadowsocks)
 	if len(payload) > 0 {
 		if _, err := remoteConn.Write(payload); err != nil {
 			r.Complete(true)
@@ -168,12 +184,11 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 		}
 	}
 
-	// 如果是 VLESS，应用响应头剥离器
 	if isVless {
 		remoteConn = protocol.NewVlessConn(remoteConn)
 	}
 
-	// 3. 建立本地连接
+	// 3. 建立本地连接 (gonet)
 	var wq waiter.Queue
 	ep, err := r.CreateEndpoint(&wq)
 	if err != nil {
@@ -182,23 +197,28 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 	}
 	r.Complete(false)
 
+	// gonet.NewTCPConn 会使用之前配置的默认 Buffer Size (现在是 2MB)
 	localConn := gonet.NewTCPConn(&wq, ep)
 	defer localConn.Close()
 
 	// 4. 双向转发
 	go func() {
-		io.Copy(localConn, remoteConn)
-		localConn.CloseWrite()
+		// Data: Stack -> Remote (Upload)
+		io.Copy(remoteConn, localConn)
+		// 如果本地关闭了写(App关闭连接)，则关闭远程的连接
+		// 注意: io.Copy 结束通常意味着 Read 到了 EOF
 	}()
 
-	io.Copy(remoteConn, localConn)
+	// Data: Remote -> Stack (Download)
+	// 这里是最容易堵塞的地方，如果 localConn 的写缓冲区太小
+	io.Copy(localConn, remoteConn)
+	localConn.CloseWrite()
 }
 
 func (s *Stack) handleUDP(r *udp.ForwarderRequest) {
 	id := r.ID()
 	targetPort := int(id.LocalPort)
 
-	// [DNS处理] 拦截 53 端口
 	if targetPort == 53 {
 		var wq waiter.Queue
 		ep, err := r.CreateEndpoint(&wq)
@@ -221,14 +241,12 @@ func (s *Stack) handleUDP(r *udp.ForwarderRequest) {
 
 	localConn := gonet.NewUDPConn(s.stack, &wq, ep)
 
-	// UDP NAT 逻辑
 	session, natErr := s.nat.GetOrCreate(srcKey, localConn, targetIP, targetPort)
 	if natErr != nil {
 		localConn.Close()
 		return
 	}
 
-	// Local -> Remote 转发
 	go func() {
 		defer localConn.Close()
 		buf := make([]byte, 4096)
@@ -255,7 +273,6 @@ func (s *Stack) handleRemoteDNS(conn *gonet.UDPConn) {
 		return
 	}
 
-	// 1. 连接代理
 	proxyConn, err := s.dialer.Dial()
 	if err != nil {
 		log.Printf("[DNS] 代理连接失败: %v", err)
@@ -263,7 +280,6 @@ func (s *Stack) handleRemoteDNS(conn *gonet.UDPConn) {
 	}
 	defer proxyConn.Close()
 
-	// 2. 发送握手
 	var payload []byte
 	isVless := false
 
@@ -276,12 +292,8 @@ func (s *Stack) handleRemoteDNS(conn *gonet.UDPConn) {
 	case "vless":
 		payload, _ = protocol.BuildVlessPayload(s.config.UUID, "8.8.8.8", 53)
 		isVless = true
-
-	// [新增] Shadowsocks
 	case "shadowsocks":
 		payload, _ = protocol.BuildShadowsocksPayload("8.8.8.8", 53)
-
-	// [新增] SOCKS5
 	case "socks", "socks5":
 		if err := protocol.HandshakeSocks5(proxyConn, s.config.Username, s.config.Password, "8.8.8.8", 53); err != nil {
 			log.Printf("[DNS] Socks5握手失败: %v", err)
@@ -299,7 +311,6 @@ func (s *Stack) handleRemoteDNS(conn *gonet.UDPConn) {
 		proxyConn = protocol.NewVlessConn(proxyConn)
 	}
 
-	// 3. 封装 DNS
 	reqData := make([]byte, 2+n)
 	reqData[0] = byte(n >> 8)
 	reqData[1] = byte(n)
@@ -309,7 +320,6 @@ func (s *Stack) handleRemoteDNS(conn *gonet.UDPConn) {
 		return
 	}
 
-	// 4. 读取响应
 	lenBuf := make([]byte, 2)
 	if _, err := io.ReadFull(proxyConn, lenBuf); err != nil {
 		return
@@ -321,7 +331,6 @@ func (s *Stack) handleRemoteDNS(conn *gonet.UDPConn) {
 		return
 	}
 
-	// 5. 写回 Android
 	conn.Write(respBuf)
 	log.Printf("[DNS] 解析完成")
 }
@@ -329,21 +338,16 @@ func (s *Stack) handleRemoteDNS(conn *gonet.UDPConn) {
 func (s *Stack) Close() {
 	s.closeOnce.Do(func() {
 		log.Println("[Stack] Stopping...")
-
 		if s.cancel != nil {
 			s.cancel()
 		}
-
 		time.Sleep(100 * time.Millisecond)
-
 		if s.device != nil {
 			s.device.Close()
 		}
-
 		if s.stack != nil {
 			s.stack.Close()
 		}
-
 		log.Println("[Stack] Stopped.")
 	})
 }
