@@ -17,11 +17,9 @@ jobs:
         with:
           go-version: '1.23'
           cache: true
-          # 指定 go.sum 路径以确保缓存键值正确
           cache-dependency-path: mandala-go/go.sum
 
-      # [新增] 缓存 Gomobile 工具链和编译环境
-      # 这将缓存 gomobile/gobind 二进制文件以及 init 生成的 android 库
+      # 缓存 Gomobile 工具链和编译环境
       - name: Cache Gomobile Toolchain
         id: cache-gomobile
         uses: actions/cache@v4
@@ -30,10 +28,9 @@ jobs:
             ~/go/bin/gomobile
             ~/go/bin/gobind
             ~/go/pkg/gomobile
-          # 使用 OS 和固定版本号作为 Key，如果工具版本更新需修改 v1 为 v2
-          key: ${{ runner.os }}-gomobile-v1
+          key: ${{ runner.os }}-gomobile-v2  # 建议每次改 target 时更新版本号 v1 -> v2
 
-      # [优化] 安装 Gomobile 工具链 (仅在缓存未命中时执行)
+      # 安装 Gomobile 工具链 (仅在缓存未命中时执行)
       - name: Install Gomobile Toolchain
         if: steps.cache-gomobile.outputs.cache-hit != 'true'
         run: |
@@ -43,7 +40,7 @@ jobs:
           echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
           $(go env GOPATH)/bin/gomobile init
 
-      # 即使缓存命中，也确保 PATH 包含 go/bin，否则找不到 gomobile 命令
+      # 即使缓存命中，也确保 PATH 包含 go/bin
       - name: Add Go Bin to PATH
         if: steps.cache-gomobile.outputs.cache-hit == 'true'
         run: echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
@@ -58,11 +55,14 @@ jobs:
         run: |
           echo "Building Mandala Core..."
           go mod tidy
-          gomobile bind -v -target=android -androidapi 21 \
+          # 【关键修改】只编译 arm64 和 arm，跳过 x86 和 x86_64
+          gomobile bind -v \
+            -target=android/arm64,android/arm \
+            -androidapi 21 \
             -ldflags="-s -w" \
             -o ../android/app/libs/mandala.aar ./mobile
 
-      # 上传 AAR 作为工件，供后续作业使用
+      # 上传 AAR 作为工件
       - name: Upload AAR Artifact
         uses: actions/upload-artifact@v4
         with:
@@ -73,7 +73,7 @@ jobs:
   # 作业 2: 构建 Android APP (依赖 build-core)
   build-app:
     name: Build Android APK
-    needs: build-core  # 关键：等待核心库构建完成
+    needs: build-core
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repository
@@ -85,7 +85,7 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      # 安装 AAPT2 依赖库 (通常不需要缓存，apt 缓存配置复杂且收益低)
+      # 安装 AAPT2 依赖库
       - name: Install libraries for AAPT2
         run: |
           sudo dpkg --add-architecture i386
@@ -99,21 +99,16 @@ jobs:
           name: mandala-library
           path: android/app/libs
 
-      # 设置 Gradle (setup-gradle 自动包含构建缓存和依赖缓存)
+      # 设置 Gradle
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v3
         with:
           gradle-version: '8.5'
-          # 如果需要更激进的缓存，可以开启 build-scan (可选)
-          # build-scan-publish: true 
-          # build-scan-terms-of-use-url: "https://gradle.com/terms-of-service"
-          # build-scan-terms-of-use-agree: "yes"
 
       - name: Build with Gradle
         working-directory: ./android
         run: |
           chmod +x gradlew
-          # 使用 --build-cache 参数显式利用 Gradle 构建缓存
           ./gradlew assembleDebug --stacktrace --no-daemon --build-cache
 
       - name: Upload APK
