@@ -16,9 +16,6 @@ import (
 )
 
 func init() {
-	// [修復] 初始化隨機數種子。
-	// 客戶端發送 WebSocket 幀必須進行 Mask 加密，
-	// 如果不初始化種子，Mask Key 將固定，會被部分防火牆識別。
 	rand.Seed(time.Now().UnixNano())
 }
 
@@ -32,11 +29,25 @@ func NewDialer(cfg *config.OutboundConfig) *Dialer {
 
 func (d *Dialer) Dial() (net.Conn, error) {
 	targetAddr := fmt.Sprintf("%s:%d", d.Config.Server, d.Config.ServerPort)
-	conn, err := net.DialTimeout("tcp", targetAddr, 5*time.Second)
+	
+	// [优化] 使用更底层的 Dialer 来配置 KeepAlive
+	dialer := &net.Dialer{
+		Timeout:   5 * time.Second,
+		KeepAlive: 30 * time.Second, // 30秒发送一次心跳，防止死连接
+	}
+	
+	conn, err := dialer.Dial("tcp", targetAddr)
 	if err != nil {
 		return nil, err
 	}
 
+	// [优化] 开启 TCP NoDelay，减少延迟
+	if tcpConn, ok := conn.(*net.TCPConn); ok {
+		tcpConn.SetNoDelay(true)
+		tcpConn.SetLinger(0)
+	}
+
+	// TLS 处理
 	if d.Config.TLS != nil && d.Config.TLS.Enabled {
 		tlsConfig := &tls.Config{
 			ServerName:         d.Config.TLS.ServerName,
@@ -55,6 +66,7 @@ func (d *Dialer) Dial() (net.Conn, error) {
 		conn = tlsConn
 	}
 
+	// WebSocket 处理
 	if d.Config.Transport != nil && d.Config.Transport.Type == "ws" {
 		wsConn, err := d.handshakeWebSocket(conn)
 		if err != nil {
@@ -153,7 +165,6 @@ func (w *WSConn) Write(b []byte) (int, error) {
 
 func (w *WSConn) Read(b []byte) (int, error) {
 	for {
-		// 1. 如果當前幀還有數據，直接讀取
 		if w.remaining > 0 {
 			limit := int64(len(b))
 			if w.remaining < limit { limit = w.remaining }
@@ -162,7 +173,6 @@ func (w *WSConn) Read(b []byte) (int, error) {
 			if n > 0 || err != nil { return n, err }
 		}
 
-		// 2. 讀取新幀
 		header, err := w.reader.ReadByte()
 		if err != nil { return 0, err }
 		
@@ -187,7 +197,6 @@ func (w *WSConn) Read(b []byte) (int, error) {
 			if _, err := io.CopyN(io.Discard, w.reader, 4); err != nil { return 0, err }
 		}
 
-		// 處理控制幀
 		switch opcode {
 		case 0x8: return 0, io.EOF
 		case 0x9, 0xA:
