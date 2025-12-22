@@ -184,11 +184,9 @@ func (h *Handler) HandleConnection(localConn net.Conn) {
 		io.Copy(remoteConn, localConn)
 		
 		// 发送完数据后，尝试给远程发 FIN (TCP Half-Close)，但不直接关闭连接
-		// 这样远程服务器知道我们发完了，但我们还可以继续接收它的响应
 		if tcpRemote, ok := remoteConn.(*net.TCPConn); ok {
 			tcpRemote.CloseWrite()
 		} else if cw, ok := remoteConn.(interface{ CloseWrite() error }); ok {
-			// 兼容其他实现了 CloseWrite 的连接类型
 			cw.CloseWrite()
 		}
 		done <- struct{}{}
@@ -205,8 +203,7 @@ func (h *Handler) HandleConnection(localConn net.Conn) {
 		done <- struct{}{}
 	}()
 
-	// 等待两个方向全部完成，或者任何一方发生错误导致 io.Copy 退出
-	// 必须等待两次，确保双向数据都已处理完毕
+	// 等待两个方向全部完成
 	<-done
 	<-done
 
