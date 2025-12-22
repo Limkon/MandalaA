@@ -94,10 +94,7 @@ func StartStack(fd int, mtu int, cfg *config.OutboundConfig) (*Stack, error) {
 }
 
 func (s *Stack) startPacketHandling() {
-	// 使用系统默认窗口大小，通常比手动指定更稳定
-	// 如果需要手动指定，建议配合 TCP 缓冲区自动调整逻辑
-	// 这里改回 0，让 gVisor 自行管理，避免 1<<20 导致部分环境内存压力
-	rcvWnd := 0 
+	rcvWnd := 0
 	maxInFlight := 2048
 
 	tcpHandler := tcp.NewForwarder(s.stack, rcvWnd, maxInFlight, func(r *tcp.ForwarderRequest) {
@@ -125,16 +122,14 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 		r.Complete(true)
 		return
 	}
-	// [关键修复] defer Close 必须配合后面的 wg.Wait() 才能安全使用
-	// 否则主线程退出会立即切断连接
 	defer remoteConn.Close()
 
 	var payload []byte
 	var hErr error
 	targetHost := id.LocalAddress.String()
 	targetPort := int(id.LocalPort)
-	
-	// 判断是否为 WebSocket 模式，用于后续逻辑判断
+
+	isVless := false
 	isWebSocket := s.config.Transport != nil && s.config.Transport.Type == "ws"
 
 	switch strings.ToLower(s.config.Type) {
@@ -145,70 +140,89 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 		payload, hErr = protocol.BuildTrojanPayload(s.config.Password, targetHost, targetPort)
 	case "vless":
 		payload, hErr = protocol.BuildVlessPayload(s.config.UUID, targetHost, targetPort)
+		isVless = true
 	case "shadowsocks":
 		payload, hErr = protocol.BuildShadowsocksPayload(targetHost, targetPort)
+		// Shadowsocks 某些实现（如 Cloudflare Worker）可能返回少量响应头，我们稍后统一处理
 	case "socks", "socks5":
 		hErr = protocol.HandshakeSocks5(remoteConn, s.config.Username, s.config.Password, targetHost, targetPort)
 	}
 
 	if hErr != nil {
+		log.Printf("[TCP] Handshake failed for %s:%d: %v", targetHost, targetPort, hErr)
 		r.Complete(true)
 		return
 	}
 
+	// 发送握手 payload（如果有）
 	if len(payload) > 0 {
 		if _, err := remoteConn.Write(payload); err != nil {
+			log.Printf("[TCP] Write payload failed: %v", err)
 			r.Complete(true)
 			return
 		}
 	}
 
-	// 如果是 VLESS 且不是 WS 模式，才包装连接
-	// 如果是 WS 模式，VLESS 头部通常包含在 WS 握手或第一帧中，视具体服务端实现而定
-	// 你之前提到 VLESS 正常，保持原有逻辑
-	if strings.ToLower(s.config.Type) == "vless" && !isWebSocket {
-		remoteConn = protocol.NewVlessConn(remoteConn)
+	// 协议特定的响应头剥离
+	switch strings.ToLower(s.config.Type) {
+	case "vless":
+		if !isWebSocket {
+			remoteConn = protocol.NewVlessConn(remoteConn)
+		}
+	case "socks", "socks5":
+		// HandshakeSocks5 已经完整读取并验证了响应，无需额外处理
+	case "shadowsocks":
+		// 主动读取并丢弃可能的预响应（某些实现会发 0-几百字节）
+		buf := make([]byte, 1024)
+		remoteConn.SetReadDeadline(time.Now().Add(3 * time.Second))
+		n, _ := remoteConn.Read(buf)
+		if n > 0 {
+			log.Printf("[SS] Discarded %d bytes of pre-response", n)
+		}
+		remoteConn.SetReadDeadline(time.Time{})
+	default:
+		// 其他协议（如 mandala/trojan）无响应头
 	}
 
+	// 创建 gVisor 端的本地连接
 	var wq waiter.Queue
 	ep, err := r.CreateEndpoint(&wq)
 	if err != nil {
+		log.Printf("[TCP] CreateEndpoint failed: %v", err)
 		r.Complete(true)
 		return
 	}
-	r.Complete(false)
 
-	localConn := gonet.NewTCPConn(&wq, ep)
+	localConn := gonet.NewTCPConn(s.stack, &wq, ep)
 	defer localConn.Close()
 
-	// [关键修复] 使用 WaitGroup 确保双向流都结束
+	// 双向转发
 	var wg sync.WaitGroup
-	wg.Add(1)
+	wg.Add(2)
 
-	// 下载流: Remote -> App
-	// 这部分数据是用户 "接收" 的网页内容
+	// 上行：App -> Remote
 	go func() {
 		defer wg.Done()
-		io.Copy(localConn, remoteConn)
-		// 告诉 App 数据传完了
+		n, err := io.Copy(remoteConn, localConn)
+		log.Printf("[TCP] Up: %d bytes, err=%v", n, err)
+		if cw, ok := remoteConn.(interface{ CloseWrite() error }); ok {
+			cw.CloseWrite()
+		}
+	}()
+
+	// 下行：Remote -> App
+	go func() {
+		defer wg.Done()
+		n, err := io.Copy(localConn, remoteConn)
+		log.Printf("[TCP] Down: %d bytes, err=%v", n, err)
 		localConn.CloseWrite()
 	}()
 
-	// 上传流: App -> Remote
-	// 这部分是用户发送的请求 (如 HTTP GET)
-	io.Copy(remoteConn, localConn)
-
-	// 上传完成后，尝试通知服务器 "我发完了" (TCP Half-Close)
-	// 这样服务器知道请求结束，但连接依然保持打开，用于发送响应
-	if cw, ok := remoteConn.(interface{ CloseWrite() error }); ok {
-		cw.CloseWrite()
-	}
-
-	// [最关键的一行]
-	// 等待下载流 Goroutine 结束。
-	// 如果不加这行，主线程会立即执行 defer remoteConn.Close()，
-	// 导致服务器还没发完的数据被强行切断 -> 造成断流。
+	// 等待上传和下载都完成
 	wg.Wait()
+
+	// 通知 gVisor 连接已完成
+	r.Complete(false)
 }
 
 func (s *Stack) handleUDP(r *udp.ForwarderRequest) {
