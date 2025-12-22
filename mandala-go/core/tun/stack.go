@@ -95,7 +95,13 @@ func StartStack(fd int, mtu int, cfg *config.OutboundConfig) (*Stack, error) {
 }
 
 func (s *Stack) startPacketHandling() {
-	tcpHandler := tcp.NewForwarder(s.stack, 30000, 10, func(r *tcp.ForwarderRequest) {
+	// [修复关键点]
+	// 1. rcvWnd (接收窗口): 从 30000 增加到 1MB (1<<20)。解决断流和速度慢的问题。
+	// 2. maxInFlight (最大并发): 从 10 增加到 2048。解决 SOCKS5 握手慢导致的并发连接被拒问题。
+	rcvWnd := 1 << 20 // 1MB
+	maxInFlight := 2048
+
+	tcpHandler := tcp.NewForwarder(s.stack, rcvWnd, maxInFlight, func(r *tcp.ForwarderRequest) {
 		go s.handleTCP(r)
 	})
 	s.stack.SetTransportProtocolHandler(tcp.ProtocolNumber, tcpHandler.HandlePacket)
