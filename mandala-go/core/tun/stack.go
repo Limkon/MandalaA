@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log"
-	// [修复] 此处无需显式引入 "net"，我们使用 interface 断言来避免依赖
+	"net"
 	"strings"
 	"sync"
 	"time"
@@ -139,8 +139,12 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 	case "vless":
 		payload, hErr = protocol.BuildVlessPayload(s.config.UUID, targetHost, targetPort)
 		isVless = true
+
+	// [新增] Shadowsocks
 	case "shadowsocks":
 		payload, hErr = protocol.BuildShadowsocksPayload(targetHost, targetPort)
+
+	// [新增] SOCKS5 (交互式握手，无 Payload 生成)
 	case "socks", "socks5":
 		hErr = protocol.HandshakeSocks5(remoteConn, s.config.Username, s.config.Password, targetHost, targetPort)
 	}
@@ -150,6 +154,7 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 		return
 	}
 
+	// 发送握手包 (适用于 Mandala, Trojan, Vless, Shadowsocks)
 	if len(payload) > 0 {
 		if _, err := remoteConn.Write(payload); err != nil {
 			r.Complete(true)
@@ -157,11 +162,12 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 		}
 	}
 
+	// 如果是 VLESS，应用响应头剥离器
 	if isVless {
 		remoteConn = protocol.NewVlessConn(remoteConn)
 	}
 
-	// 3. 建立本地连接 (TUN -> gVisor)
+	// 3. 建立本地连接
 	var wq waiter.Queue
 	ep, err := r.CreateEndpoint(&wq)
 	if err != nil {
@@ -173,52 +179,20 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 	localConn := gonet.NewTCPConn(&wq, ep)
 	defer localConn.Close()
 
-	// 4. 双向转发 (修复版：双向等待，防止单侧结束导致连接中断)
-	done := make(chan struct{}, 2)
-
-	// 下行：Remote -> Local (下载)
+	// 4. 双向转发
 	go func() {
-		// 使用 io.Copy 自动处理缓冲
 		io.Copy(localConn, remoteConn)
-		
-		// 尝试发送 FIN 给本地 (gonet.TCPConn 支持 CloseWrite)
-		if tcpLocal, ok := localConn.(*gonet.TCPConn); ok {
-			tcpLocal.CloseWrite()
-		}
-		done <- struct{}{}
+		localConn.CloseWrite()
 	}()
 
-	// 上行：Local -> Remote (上传)
-	go func() {
-		io.Copy(remoteConn, localConn)
-		
-		// 尝试发送 FIN 给远程
-		// 这里的 interface 断言避免了必须引入 "net" 包的依赖，
-		// 同时能兼容 *net.TCPConn 或其他支持 CloseWrite 的连接
-		if cw, ok := remoteConn.(interface{ CloseWrite() error }); ok {
-			cw.CloseWrite()
-		}
-		done <- struct{}{}
-	}()
-
-	// 等待两个方向全部结束
-	// 关键逻辑：只要有一方结束（通常是上传先结束），不能立即 Close，必须等另一方（下载）也结束
-	<-done
-	<-done
-
-	// 清理资源
-	localConn.Close()
-	remoteConn.Close()
+	io.Copy(remoteConn, localConn)
 }
 
-// handleUDP 处理 UDP 流量
-// [修复说明] 仅处理 DNS (53端口)，丢弃其他所有 UDP 流量 (如 QUIC)。
-// 这迫使浏览器回退到 TCP 模式，解决网页无法打开的问题。
 func (s *Stack) handleUDP(r *udp.ForwarderRequest) {
 	id := r.ID()
 	targetPort := int(id.LocalPort)
 
-	// [DNS处理] 拦截 53 端口，进行远程解析
+	// [DNS处理] 拦截 53 端口
 	if targetPort == 53 {
 		var wq waiter.Queue
 		ep, err := r.CreateEndpoint(&wq)
@@ -230,10 +204,39 @@ func (s *Stack) handleUDP(r *udp.ForwarderRequest) {
 		return
 	}
 
-	// [UDP 丢弃]
-	// 对于非 53 端口 UDP (如 QUIC)，直接返回。
-	// gVisor UDP ForwarderRequest 没有 Complete 方法，不调用 CreateEndpoint 即视为丢弃/不处理。
-	return
+	targetIP := net.IP(id.LocalAddress.AsSlice()).String()
+	srcKey := fmt.Sprintf("%s:%d->%s:%d", id.RemoteAddress.String(), id.RemotePort, targetIP, targetPort)
+
+	var wq waiter.Queue
+	ep, err := r.CreateEndpoint(&wq)
+	if err != nil {
+		return
+	}
+
+	localConn := gonet.NewUDPConn(s.stack, &wq, ep)
+
+	// UDP NAT 逻辑
+	session, natErr := s.nat.GetOrCreate(srcKey, localConn, targetIP, targetPort)
+	if natErr != nil {
+		localConn.Close()
+		return
+	}
+
+	// Local -> Remote 转发
+	go func() {
+		defer localConn.Close()
+		buf := make([]byte, 4096)
+		for {
+			localConn.SetDeadline(time.Now().Add(60 * time.Second))
+			n, rErr := localConn.Read(buf)
+			if rErr != nil {
+				return
+			}
+			if _, wErr := session.RemoteConn.Write(buf[:n]); wErr != nil {
+				return
+			}
+		}
+	}()
 }
 
 func (s *Stack) handleRemoteDNS(conn *gonet.UDPConn) {
@@ -267,8 +270,12 @@ func (s *Stack) handleRemoteDNS(conn *gonet.UDPConn) {
 	case "vless":
 		payload, _ = protocol.BuildVlessPayload(s.config.UUID, "8.8.8.8", 53)
 		isVless = true
+
+	// [新增] Shadowsocks
 	case "shadowsocks":
 		payload, _ = protocol.BuildShadowsocksPayload("8.8.8.8", 53)
+
+	// [新增] SOCKS5
 	case "socks", "socks5":
 		if err := protocol.HandshakeSocks5(proxyConn, s.config.Username, s.config.Password, "8.8.8.8", 53); err != nil {
 			log.Printf("[DNS] Socks5握手失败: %v", err)

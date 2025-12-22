@@ -5,7 +5,6 @@ import (
 	"log"
 	"net"
 	"strings"
-	"syscall"
 	"time"
 
 	"mandala/core/config"
@@ -36,10 +35,12 @@ func (h *Handler) HandleConnection(localConn net.Conn) {
 	if err != nil || n < 4 {
 		return
 	}
+
 	cmd := buf[1]
 	atyp := buf[3]
 	var targetHost string
 	var targetPort int
+
 	if cmd != 0x01 {
 		return
 	}
@@ -72,6 +73,7 @@ func (h *Handler) HandleConnection(localConn net.Conn) {
 	default:
 		return
 	}
+
 	portBuf := make([]byte, 2)
 	if _, err := io.ReadFull(localConn, portBuf); err != nil {
 		return
@@ -91,6 +93,7 @@ func (h *Handler) HandleConnection(localConn net.Conn) {
 	// 4. 发送协议头 (握手)
 	proxyType := strings.ToLower(h.Config.Type)
 	isVless := false
+
 	switch proxyType {
 	case "mandala":
 		client := protocol.NewMandalaClient(h.Config.Username, h.Config.Password)
@@ -103,6 +106,7 @@ func (h *Handler) HandleConnection(localConn net.Conn) {
 			log.Printf("[Mandala] Handshake write failed: %v", err)
 			return
 		}
+
 	case "trojan":
 		payload, err := protocol.BuildTrojanPayload(h.Config.Password, targetHost, targetPort)
 		if err != nil {
@@ -113,6 +117,7 @@ func (h *Handler) HandleConnection(localConn net.Conn) {
 			log.Printf("[Trojan] Handshake write failed: %v", err)
 			return
 		}
+
 	case "vless":
 		payload, err := protocol.BuildVlessPayload(h.Config.UUID, targetHost, targetPort)
 		if err != nil {
@@ -124,6 +129,8 @@ func (h *Handler) HandleConnection(localConn net.Conn) {
 			return
 		}
 		isVless = true
+
+	// [新增] Shadowsocks 支持
 	case "shadowsocks":
 		payload, err := protocol.BuildShadowsocksPayload(targetHost, targetPort)
 		if err != nil {
@@ -134,12 +141,15 @@ func (h *Handler) HandleConnection(localConn net.Conn) {
 			log.Printf("[Shadowsocks] Handshake write failed: %v", err)
 			return
 		}
+
+	// [新增] SOCKS5 支持 (含认证)
 	case "socks", "socks5":
 		err := protocol.HandshakeSocks5(remoteConn, h.Config.Username, h.Config.Password, targetHost, targetPort)
 		if err != nil {
 			log.Printf("[Socks5] Handshake failed: %v", err)
 			return
 		}
+
 	default:
 		log.Println("[Proxy] Protocol not implemented:", proxyType)
 		return
@@ -155,59 +165,21 @@ func (h *Handler) HandleConnection(localConn net.Conn) {
 		return
 	}
 
-	// 6. 双向转发 (优化版：处理半关闭，防止接收数据中断)
+	// 6. 双向转发
 	localConn.SetDeadline(time.Time{})
 	remoteConn.SetDeadline(time.Time{})
 
-	// 优化 TCP 参数：开启 NoDelay 和 KeepAlive
-	if tcpl, ok := localConn.(*net.TCPConn); ok {
-		tcpl.SetNoDelay(true)
-		tcpl.SetKeepAlive(true)
-		tcpl.SetKeepAlivePeriod(30 * time.Second)
-	}
-	if tcpr, ok := remoteConn.(*net.TCPConn); ok {
-		tcpr.SetNoDelay(true)
-		tcpr.SetKeepAlive(true)
-		tcpr.SetKeepAlivePeriod(30 * time.Second)
-		// 尝试设置 MSS 防止碎片 (可选)
-		if f, err := tcpr.File(); err == nil {
-			_ = syscall.SetsockoptInt(int(f.Fd()), syscall.IPPROTO_TCP, syscall.TCP_MAXSEG, 1360)
-		}
-	}
+	errChan := make(chan error, 2)
 
-	// 使用通道等待两个方向的传输完成
-	done := make(chan struct{}, 2)
-
-	// 上行：Local -> Remote (上传)
 	go func() {
-		// io.Copy 内部会自动使用较大的缓冲区 (32KB)，比手动循环更高效
-		io.Copy(remoteConn, localConn)
-		
-		// 发送完数据后，尝试给远程发 FIN (TCP Half-Close)，但不直接关闭连接
-		if tcpRemote, ok := remoteConn.(*net.TCPConn); ok {
-			tcpRemote.CloseWrite()
-		} else if cw, ok := remoteConn.(interface{ CloseWrite() error }); ok {
-			cw.CloseWrite()
-		}
-		done <- struct{}{}
+		_, err := io.Copy(remoteConn, localConn)
+		errChan <- err
 	}()
 
-	// 下行：Remote -> Local (下载)
 	go func() {
-		io.Copy(localConn, remoteConn)
-		
-		// 接收完数据后，尝试给本地发 FIN
-		if tcpLocal, ok := localConn.(*net.TCPConn); ok {
-			tcpLocal.CloseWrite()
-		}
-		done <- struct{}{}
+		_, err := io.Copy(localConn, remoteConn)
+		errChan <- err
 	}()
 
-	// 等待两个方向全部完成
-	<-done
-	<-done
-
-	// 全部结束，安全关闭连接
-	localConn.Close()
-	remoteConn.Close()
+	<-errChan
 }

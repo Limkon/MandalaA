@@ -1,130 +1,129 @@
 package protocol
 
 import (
-	"bytes"
-	"encoding/binary"
-	"errors"
 	"fmt"
 	"io"
-	"log"
-	"net"
 )
 
 // HandshakeSocks5 执行 SOCKS5 客户端握手
+// 修改：强制密码认证模式（当存在用户名时，仅发送 0x02 方法，不发送 0x00）
 func HandshakeSocks5(conn io.ReadWriter, username, password, targetHost string, targetPort int) error {
-	log.Printf("[Socks5] Handshaking for %s:%d", targetHost, targetPort)
-
-	// 1. 发送 Method
-	methods := []byte{0x00} // 默认无认证
-	if username != "" && password != "" {
-		methods = []byte{0x02, 0x00} // 支持用户名/密码认证
+	// 1. 发送版本和支持的认证方法
+	// [修改] 逻辑变更：
+	// 如果提供了用户名，方法列表只包含 0x02 (USERNAME/PASSWORD)，强制服务端使用密码认证。
+	// 只有在未提供用户名时，才发送 0x00 (NO AUTHENTICATION REQUIRED)。
+	var methods []byte
+	if username != "" {
+		methods = []byte{0x02}
+	} else {
+		methods = []byte{0x00}
 	}
+	
 	initBuf := make([]byte, 2+len(methods))
-	initBuf[0] = 0x05
-	initBuf[1] = byte(len(methods))
+	initBuf[0] = 0x05 // Ver
+	initBuf[1] = byte(len(methods)) // NMethods
 	copy(initBuf[2:], methods)
-
+	
 	if _, err := conn.Write(initBuf); err != nil {
-		return fmt.Errorf("write method selection failed: %v", err)
+		return fmt.Errorf("socks5 init write failed: %v", err)
 	}
 
-	// 2. 读取 Method Response
+	// 2. 读取服务端选定的方法
 	resp := make([]byte, 2)
 	if _, err := io.ReadFull(conn, resp); err != nil {
-		return fmt.Errorf("read method response failed: %v", err)
+		return fmt.Errorf("socks5 init read failed: %v", err)
 	}
 	if resp[0] != 0x05 {
-		return fmt.Errorf("invalid SOCKS version: %d", resp[0])
+		return fmt.Errorf("socks5 invalid version: %d", resp[0])
 	}
 
 	authMethod := resp[1]
-	if authMethod == 0x02 && username != "" && password != "" {
-		// 3. 用户名/密码认证
+
+	// 3. 根据选定的方法进行认证
+	if authMethod == 0x02 {
+		// Username/Password 认证 (RFC 1929)
 		uLen := len(username)
 		pLen := len(password)
+		if uLen > 255 || pLen > 255 {
+			return fmt.Errorf("socks5 username/password too long")
+		}
+		
+		// 构造认证包: [Ver(0x01)] [ULen] [User...] [PLen] [Pass...]
 		authBuf := make([]byte, 3+uLen+pLen)
-		authBuf[0] = 0x01
+		authBuf[0] = 0x01 // Auth Version (必须是 0x01)
 		authBuf[1] = byte(uLen)
 		copy(authBuf[2:], username)
 		authBuf[2+uLen] = byte(pLen)
 		copy(authBuf[3+uLen:], password)
-
+		
 		if _, err := conn.Write(authBuf); err != nil {
-			return fmt.Errorf("write auth failed: %v", err)
+			return fmt.Errorf("socks5 auth write failed: %v", err)
 		}
-
+		
+		// 读取认证响应: [Ver(0x01)] [Status]
 		authResp := make([]byte, 2)
 		if _, err := io.ReadFull(conn, authResp); err != nil {
-			return fmt.Errorf("read auth response failed: %v", err)
+			return fmt.Errorf("socks5 auth resp read failed: %v", err)
 		}
+		
+		// Status 0x00 表示成功
 		if authResp[1] != 0x00 {
-			return fmt.Errorf("authentication failed, status: 0x%02x", authResp[1])
+			return fmt.Errorf("socks5 authentication failed (status: 0x%02x)", authResp[1])
 		}
+
+	} else if authMethod == 0xFF {
+		return fmt.Errorf("socks5 no acceptable methods (server rejected auth)")
 	} else if authMethod != 0x00 {
-		return fmt.Errorf("unsupported authentication method: 0x%02x", authMethod)
+		return fmt.Errorf("socks5 unsupported auth method selected: 0x%02x", authMethod)
+	} else if authMethod == 0x00 && username != "" {
+		// 如果我们发了 0x02 但服务端回了 0x00 (理论上不应发生，因为我们没发 0x00)，
+		// 或者在 username 为空时回了 0x00，这都是正常的。
+		// 但如果是“只支持密码用户”模式下，服务端回 0x00 意味着它忽略了认证需求，这里暂且允许通过。
 	}
 
-	// 4. 发送 CONNECT 请求
-	var buf bytes.Buffer
-	buf.Write([]byte{0x05, 0x01, 0x00}) // VER, CMD=CONNECT, RSV
-
-	ip := net.ParseIP(targetHost)
-	if ip != nil {
-		if ip4 := ip.To4(); ip4 != nil {
-			buf.WriteByte(0x01) // IPv4
-			buf.Write(ip4)
-		} else {
-			buf.WriteByte(0x04) // IPv6
-			buf.Write(ip.To16())
-		}
-	} else {
-		if len(targetHost) > 255 {
-			return errors.New("domain name too long")
-		}
-		buf.WriteByte(0x03) // Domain
-		buf.WriteByte(byte(len(targetHost)))
-		buf.WriteString(targetHost)
+	// 4. 发送连接请求 (CONNECT CMD=0x01)
+	// 格式: 05 01 00 [ATYP] [ADDR] [PORT]
+	head := []byte{0x05, 0x01, 0x00}
+	addr, err := ToSocksAddr(targetHost, targetPort) // 使用 utils.go 中的通用函数
+	if err != nil {
+		return err
+	}
+	
+	if _, err := conn.Write(append(head, addr...)); err != nil {
+		return fmt.Errorf("socks5 connect write failed: %v", err)
 	}
 
-	portBuf := make([]byte, 2)
-	binary.BigEndian.PutUint16(portBuf, uint16(targetPort))
-	buf.Write(portBuf)
-
-	if _, err := conn.Write(buf.Bytes()); err != nil {
-		return fmt.Errorf("write connect request failed: %v", err)
-	}
-
-	// 5. 读取响应头部 (4 字节)
+	// 5. 读取连接响应
+	// 响应格式: 05 00 00 [ATYP] [ADDR] [PORT]
 	connRespHead := make([]byte, 4)
 	if _, err := io.ReadFull(conn, connRespHead); err != nil {
-		return fmt.Errorf("read connect response header failed: %v", err)
-	}
-	if connRespHead[1] != 0x00 {
-		return fmt.Errorf("connect failed, status: 0x%02x", connRespHead[1])
+		return fmt.Errorf("socks5 connect resp header read failed: %v", err)
 	}
 
-	// 6. 完整读取剩余的 BND.ADDR + PORT（必须消耗，否则流会残留）
+	// REP 字段: 0x00 表示成功
+	if connRespHead[1] != 0x00 {
+		return fmt.Errorf("socks5 connect failed with error: 0x%02x", connRespHead[1])
+	}
+
+	// 读取剩余的 BND.ADDR 和 BND.PORT (消耗掉缓冲区)
 	var left int
 	switch connRespHead[3] {
-	case 0x01: // IPv4
-		left = 4 + 2
-	case 0x04: // IPv6
-		left = 16 + 2
+	case 0x01: left = 4 + 2 // IPv4
+	case 0x04: left = 16 + 2 // IPv6
 	case 0x03: // Domain
 		lenByte := make([]byte, 1)
 		if _, err := io.ReadFull(conn, lenByte); err != nil {
-			return fmt.Errorf("read domain length failed: %v", err)
+			return fmt.Errorf("socks5 read domain len failed: %v", err)
 		}
 		left = int(lenByte[0]) + 2
 	default:
-		return fmt.Errorf("invalid address type: 0x%02x", connRespHead[3])
+		return fmt.Errorf("socks5 invalid address type in response: 0x%02x", connRespHead[3])
 	}
 
 	discard := make([]byte, left)
 	if _, err := io.ReadFull(conn, discard); err != nil {
-		return fmt.Errorf("read connect response body failed: %v", err)
+		return fmt.Errorf("socks5 connect resp body read failed: %v", err)
 	}
 
-	log.Printf("[Socks5] Handshake successful for %s:%d", targetHost, targetPort)
 	return nil
 }
