@@ -3,6 +3,7 @@ package protocol
 import (
 	"net"
 	"strings"
+	"time"
 )
 
 // NewProtocolConn 根据协议类型返回一个已处理握手响应的连接
