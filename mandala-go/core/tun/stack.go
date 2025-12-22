@@ -129,7 +129,6 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 	targetHost := id.LocalAddress.String()
 	targetPort := int(id.LocalPort)
 
-	isVless := false
 	isWebSocket := s.config.Transport != nil && s.config.Transport.Type == "ws"
 
 	switch strings.ToLower(s.config.Type) {
@@ -140,7 +139,6 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 		payload, hErr = protocol.BuildTrojanPayload(s.config.Password, targetHost, targetPort)
 	case "vless":
 		payload, hErr = protocol.BuildVlessPayload(s.config.UUID, targetHost, targetPort)
-		isVless = true
 	case "shadowsocks":
 		payload, hErr = protocol.BuildShadowsocksPayload(targetHost, targetPort)
 		// Shadowsocks 某些实现（如 Cloudflare Worker）可能返回少量响应头，我们稍后统一处理
@@ -193,7 +191,7 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 		return
 	}
 
-	localConn := gonet.NewTCPConn(s.stack, &wq, ep)
+	localConn := gonet.NewTCPConn(&wq, ep)
 	defer localConn.Close()
 
 	// 双向转发
@@ -235,7 +233,7 @@ func (s *Stack) handleUDP(r *udp.ForwarderRequest) {
 		if err != nil {
 			return
 		}
-		localConn := gonet.NewUDPConn(s.stack, &wq, ep)
+		localConn := gonet.NewUDPConn(&wq, ep)
 		go s.handleRemoteDNS(localConn)
 		return
 	}
@@ -249,7 +247,7 @@ func (s *Stack) handleUDP(r *udp.ForwarderRequest) {
 		return
 	}
 
-	localConn := gonet.NewUDPConn(s.stack, &wq, ep)
+	localConn := gonet.NewUDPConn(&wq, ep)
 
 	session, natErr := s.nat.GetOrCreate(srcKey, localConn, targetIP, targetPort)
 	if natErr != nil {
