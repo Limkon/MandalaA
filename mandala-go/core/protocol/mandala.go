@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
+	"log"
 	"net"
 )
 
@@ -26,45 +27,44 @@ func NewMandalaClient(username, password string) *MandalaClient {
 }
 
 // BuildHandshakePayload 构造 Mandala 协议的握手包
-// 协议结构参考:
-// Salt(4) + XOR( Hash(56) + PadLen(1) + Padding(N) + Cmd(1) + AddrType(1) + Addr... + Port(2) + CRLF(2) )
 func (c *MandalaClient) BuildHandshakePayload(targetHost string, targetPort int) ([]byte, error) {
+	log.Printf("[Mandala] 开始构造握手包 -> %s:%d", targetHost, targetPort)
+
 	// 1. 生成随机 Salt (4 bytes)
 	salt := make([]byte, 4)
 	if _, err := io.ReadFull(rand.Reader, salt); err != nil {
 		return nil, err
 	}
+	log.Printf("[Mandala] 生成随机 Salt: %x", salt)
 
-	// 2. 准备明文 Payload (临时缓冲区)
+	// 2. 准备明文 Payload
 	var buf bytes.Buffer
 
 	// 2.1 哈希 ID (SHA224 Hex String, 56 bytes)
-	// 对应 C 代码: trojan_password_hash(g_proxyConfig.pass, hex_pass);
-	// 使用密码生成 SHA224 哈希并转为 Hex 字符串
 	hash := sha256.Sum224([]byte(c.Password))
-	hashHex := hex.EncodeToString(hash[:]) // 28 bytes binary -> 56 bytes hex string
+	hashHex := hex.EncodeToString(hash[:])
 	if len(hashHex) != 56 {
 		return nil, errors.New("hash generation failed")
 	}
 	buf.WriteString(hashHex)
+	log.Printf("[Mandala] 密码哈希已生成 (56字节)")
 
 	// 2.2 随机填充 (Padding)
-	// 对应 C 代码: int pad_len = rand() % 16;
 	padLenByte := make([]byte, 1)
 	if _, err := io.ReadFull(rand.Reader, padLenByte); err != nil {
 		return nil, err
 	}
 	padLen := int(padLenByte[0] % 16)
-
-	buf.WriteByte(byte(padLen)) // PadLen (1 byte)
+	buf.WriteByte(byte(padLen)) 
 
 	if padLen > 0 {
 		padding := make([]byte, padLen)
 		if _, err := io.ReadFull(rand.Reader, padding); err != nil {
 			return nil, err
 		}
-		buf.Write(padding) // Padding (N bytes)
+		buf.Write(padding) 
 	}
+	log.Printf("[Mandala] 添加随机填充长度: %d", padLen)
 
 	// 2.3 指令 CMD (0x01 Connect)
 	buf.WriteByte(0x01)
@@ -73,22 +73,22 @@ func (c *MandalaClient) BuildHandshakePayload(targetHost string, targetPort int)
 	ip := net.ParseIP(targetHost)
 	if ip != nil {
 		if ip4 := ip.To4(); ip4 != nil {
-			// IPv4: 0x01 + 4 bytes IP
 			buf.WriteByte(0x01)
 			buf.Write(ip4)
+			log.Printf("[Mandala] 目标类型: IPv4")
 		} else {
-			// IPv6: 0x04 + 16 bytes IP
 			buf.WriteByte(0x04)
 			buf.Write(ip.To16())
+			log.Printf("[Mandala] 目标类型: IPv6")
 		}
 	} else {
-		// Domain: 0x03 + Len(1) + DomainString
 		if len(targetHost) > 255 {
 			return nil, errors.New("domain too long")
 		}
 		buf.WriteByte(0x03)
 		buf.WriteByte(byte(len(targetHost)))
 		buf.WriteString(targetHost)
+		log.Printf("[Mandala] 目标类型: 域名 (%s)", targetHost)
 	}
 
 	// 2.5 端口 (2 bytes Big Endian)
@@ -104,13 +104,13 @@ func (c *MandalaClient) BuildHandshakePayload(targetHost string, targetPort int)
 	finalSize := 4 + len(plaintext)
 	finalBuf := make([]byte, finalSize)
 
-	// 写入 Salt 到头部
 	copy(finalBuf[0:4], salt)
 
-	// 执行 XOR 加密: Cipher[i] = Plain[i] ^ Salt[i % 4]
+	// 执行 XOR 加密
 	for i := 0; i < len(plaintext); i++ {
 		finalBuf[4+i] = plaintext[i] ^ salt[i%4]
 	}
 
+	log.Printf("[Mandala] 握手包构造完成，总长度: %d", finalSize)
 	return finalBuf, nil
 }
