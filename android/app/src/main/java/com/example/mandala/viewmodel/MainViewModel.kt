@@ -12,8 +12,9 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import mobile.Mobile
+import java.io.File
 
-// --- 数据模型定义 (保持原样) ---
+// --- 数据模型定义 ---
 
 data class AppStrings(
     val home: String, val profiles: String, val settings: String,
@@ -153,7 +154,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _isConnected.value = Mobile.isRunning()
     }
 
-    // --- 设置更新 (保持原样) ---
+    // --- 设置更新 ---
 
     fun updateSetting(key: String, value: Boolean) {
         prefs.edit().putBoolean(key, value).apply()
@@ -183,7 +184,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _language.value = lang
     }
 
-    // --- 节点管理与连接 (保持原样) ---
+    // --- 节点管理与连接 ---
 
     fun refreshNodes() {
         viewModelScope.launch {
@@ -353,12 +354,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _logs.value = current
     }
 
-    // [新增并重写] generateConfigJson，注入 log_path
     private fun generateConfigJson(node: Node): String {
         val useTls = node.protocol != "socks" && node.protocol != "shadowsocks" && node.protocol != "socks5"
         
-        // 自动计算日志文件路径 (位于 App 私有数据目录)
-        val logFile = getApplication<Application>().filesDir.absolutePath + "/mandala_core.log"
+        // [修复] 将路径改为外部私有目录，普通文件管理器即可查看
+        // 路径通常为: /sdcard/Android/data/com.example.mandala/files/mandala_core.log
+        val logDir = getApplication<Application>().getExternalFilesDir(null)
+        val logFile = if (logDir != null) {
+            File(logDir, "mandala_core.log").absolutePath
+        } else {
+            // 回退到内部存储
+            getApplication<Application>().filesDir.absolutePath + "/mandala_core.log"
+        }
+
+        // 在 UI 日志中打印一次路径，方便你确认
+        addLog("[调试] 日志路径: $logFile")
         
         return """
         {
