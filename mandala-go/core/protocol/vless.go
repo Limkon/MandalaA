@@ -5,15 +5,17 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"log"
 	"net"
 )
 
 // BuildVlessPayload 构造 VLESS 握手包 (Version 0)
-// 结构: Version(1) + UUID(16) + AddonLen(1) + CMD(1) + PORT(2) + ATYP(1) + ADDR
-// 修复：使用 VLESS 特定的地址类型常量 (IPv4=1, Domain=2, IPv6=3)
 func BuildVlessPayload(uuidStr, targetHost string, targetPort int) ([]byte, error) {
-	uuid, err := ParseUUID(uuidStr) // 调用 crypto.go 中的 ParseUUID
+	log.Printf("[Vless] 开始构造请求 -> %s:%d (UUID: %s)", targetHost, targetPort, uuidStr)
+	
+	uuid, err := ParseUUID(uuidStr) 
 	if err != nil {
+		log.Printf("[Vless] UUID 解析错误: %v", err)
 		return nil, err
 	}
 
@@ -33,29 +35,29 @@ func BuildVlessPayload(uuidStr, targetHost string, targetPort int) ([]byte, erro
 	ip := net.ParseIP(targetHost)
 	if ip != nil {
 		if ip4 := ip.To4(); ip4 != nil {
-			// IPv4: 0x01 + 4 bytes IP
 			buf.WriteByte(0x01)
 			buf.Write(ip4)
+			log.Printf("[Vless] 地址类型: IPv4")
 		} else {
-			// IPv6: 0x03 + 16 bytes IP
 			buf.WriteByte(0x03)
 			buf.Write(ip.To16())
+			log.Printf("[Vless] 地址类型: IPv6")
 		}
 	} else {
-		// Domain: 0x02 + Len(1) + DomainString
 		if len(targetHost) > 255 {
 			return nil, fmt.Errorf("domain name too long: %s", targetHost)
 		}
 		buf.WriteByte(0x02)
 		buf.WriteByte(byte(len(targetHost)))
 		buf.WriteString(targetHost)
+		log.Printf("[Vless] 地址类型: 域名 (%s)", targetHost)
 	}
 
+	log.Printf("[Vless] 请求包构造完成")
 	return buf.Bytes(), nil
 }
 
 // VlessConn 包装器，用于剥离 VLESS 服务端响应头
-// Response Header: [Version(1)][AddonLen(1)][AddonBytes(AddonLen)]
 type VlessConn struct {
 	net.Conn
 	headerStripped bool
@@ -71,22 +73,21 @@ func (vc *VlessConn) Read(b []byte) (int, error) {
 		return vc.Conn.Read(b)
 	}
 
-	// 初始化 reader
 	if vc.reader == nil {
 		vc.reader = vc.Conn
 	}
 
-	// 读取前两个字节 [Version, AddonLen]
-	// 即使底层是 TCP 流，这里也会阻塞直到读够2字节
+	log.Printf("[Vless] 正在读取并剥离服务端响应头...")
 	head := make([]byte, 2)
 	n, err := io.ReadFull(vc.reader, head)
 	if err != nil {
+		log.Printf("[Vless] 读取响应头失败: %v", err)
 		return n, err
 	}
 
 	addonLen := int(head[1])
 	if addonLen > 0 {
-		// 丢弃 Addon 数据
+		log.Printf("[Vless] 发现 Addon 数据，长度: %d，正在丢弃", addonLen)
 		discard := make([]byte, addonLen)
 		if _, err := io.ReadFull(vc.reader, discard); err != nil {
 			return 0, err
@@ -94,8 +95,8 @@ func (vc *VlessConn) Read(b []byte) (int, error) {
 	}
 
 	vc.headerStripped = true
+	log.Printf("[Vless] 响应头剥离成功，进入数据传输阶段")
 
-	// 此时 header 已剥离，如果调用方提供的 buffer 长度 > 0，则尝试读取真实数据
 	if len(b) == 0 {
 		return 0, nil
 	}
