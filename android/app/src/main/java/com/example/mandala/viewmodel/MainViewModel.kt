@@ -29,7 +29,6 @@ data class AppStrings(
     val tlsFragment: String, val tlsFragmentDesc: String,
     val randomPadding: String, val randomPaddingDesc: String,
     val localPort: String,
-    // [新增] 日志开关相关文字
     val enableLogging: String,
     val enableLoggingDesc: String,
     val appSettings: String, val theme: String, val language: String,
@@ -53,7 +52,6 @@ val ChineseStrings = AppStrings(
     tlsFragment = "TLS 分片", tlsFragmentDesc = "拆分 TLS 记录以绕过 DPI 检测",
     randomPadding = "随机填充", randomPaddingDesc = "向数据包添加随机噪音",
     localPort = "本地监听端口",
-    // [新增]
     enableLogging = "启用日志记录",
     enableLoggingDesc = "将核心运行日志保存到本地文件以便调试",
     appSettings = "应用设置", theme = "主题", language = "语言",
@@ -77,7 +75,6 @@ val EnglishStrings = AppStrings(
     tlsFragment = "TLS Fragment", tlsFragmentDesc = "Split TLS records to bypass DPI",
     randomPadding = "Random Padding", randomPaddingDesc = "Add random noise to packets",
     localPort = "Local Port",
-    // [新增]
     enableLogging = "Enable Logging",
     enableLoggingDesc = "Save core logs to local file for debugging",
     appSettings = "App Settings", theme = "Theme", language = "Language",
@@ -137,7 +134,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _localPort = MutableStateFlow(prefs.getInt("local_port", 10809))
     val localPort = _localPort.asStateFlow()
 
-    // [新增] 日志开关状态
     private val _loggingEnabled = MutableStateFlow(prefs.getBoolean("logging_enabled", false))
     val loggingEnabled = _loggingEnabled.asStateFlow()
 
@@ -176,7 +172,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             "allow_insecure" -> _allowInsecure.value = value
             "tls_fragment" -> _tlsFragment.value = value
             "random_padding" -> _randomPadding.value = value
-            "logging_enabled" -> _loggingEnabled.value = value // [新增]
+            "logging_enabled" -> _loggingEnabled.value = value
         }
     }
 
@@ -232,12 +228,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /**
+     * 选择节点：如果当前正在连接，则自动执行“停止 -> 延迟 -> 启动”序列以切换配置
+     */
     fun selectNode(node: Node) {
+        val wasConnected = _isConnected.value
         val updatedNode = node.copy(isSelected = true)
         _currentNode.value = updatedNode
         addLog("[系统] 已选择: ${node.tag}")
 
         viewModelScope.launch {
+            // 更新持久化状态
             val currentList = _nodes.value.map { 
                 if (it.server == node.server && it.port == node.port && 
                     it.protocol == node.protocol && it.tag == node.tag) {
@@ -248,6 +249,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             _nodes.value = currentList
             repository.saveNodes(currentList)
+
+            // [修复逻辑] 如果 VPN 正在运行，自动重启以应用新节点配置
+            if (wasConnected) {
+                addLog("[系统] 检测到节点变更，正在自动重启服务...")
+                _vpnEventChannel.send(VpnEvent.StopVpn)
+                
+                // 延时确保 Go 核心释放网卡资源、FD 和单例变量
+                kotlinx.coroutines.delay(800) 
+                
+                val json = generateConfigJson(updatedNode)
+                _vpnEventChannel.send(VpnEvent.StartVpn(json))
+            }
         }
     }
 
@@ -371,7 +384,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun generateConfigJson(node: Node): String {
         val useTls = node.sni.isNotEmpty() || node.transport == "ws" || node.port == 443
 
-        // [重构] 根据开关决定是否传递 log_path。关闭时 logPath 为空，Go 核心 initLog 会直接返回，不产生文件。
         val logPath = if (_loggingEnabled.value) {
             val logDir = getApplication<Application>().getExternalFilesDir(null)
             if (logDir != null) File(logDir, "mandala_core.log").absolutePath 
