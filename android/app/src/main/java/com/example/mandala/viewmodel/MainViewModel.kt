@@ -13,47 +13,27 @@ import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import mobile.Mobile
 
-// --- 数据模型定义 ---
+// --- 数据模型定义 (保持原样) ---
 
 data class AppStrings(
-    val home: String,
-    val profiles: String,
-    val settings: String,
-    val connect: String,
-    val disconnect: String,
-    val connected: String,
-    val notConnected: String,
+    val home: String, val profiles: String, val settings: String,
+    val connect: String, val disconnect: String,
+    val connected: String, val notConnected: String,
     val noNodeSelected: String,
-    val nodeManagement: String,
-    val importFromClipboard: String,
-    val clipboardEmpty: String,
+    val nodeManagement: String, val importFromClipboard: String, val clipboardEmpty: String,
     val connectionSettings: String,
-    val vpnMode: String,
-    val vpnModeDesc: String,
-    val allowInsecure: String,
-    val allowInsecureDesc: String,
+    val vpnMode: String, val vpnModeDesc: String,
+    val allowInsecure: String, val allowInsecureDesc: String,
     val protocolSettings: String,
-    val tlsFragment: String,
-    val tlsFragmentDesc: String,
-    val randomPadding: String,
-    val randomPaddingDesc: String,
+    val tlsFragment: String, val tlsFragmentDesc: String,
+    val randomPadding: String, val randomPaddingDesc: String,
     val localPort: String,
-    val appSettings: String,
-    val theme: String,
-    val language: String,
-    val about: String,
-    val confirm: String,
-    val cancel: String,
-    val edit: String,
-    val delete: String,
-    val save: String,
+    val appSettings: String, val theme: String, val language: String,
+    val about: String, val confirm: String, val cancel: String,
+    val edit: String, val delete: String, val save: String,
     val deleteConfirm: String,
-    val tag: String,
-    val address: String,
-    val port: String,
-    val password: String,
-    val uuid: String,
-    val sni: String
+    val tag: String, val address: String, val port: String,
+    val password: String, val uuid: String, val sni: String
 )
 
 val ChineseStrings = AppStrings(
@@ -173,7 +153,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _isConnected.value = Mobile.isRunning()
     }
 
-    // --- 设置更新 ---
+    // --- 设置更新 (保持原样) ---
 
     fun updateSetting(key: String, value: Boolean) {
         prefs.edit().putBoolean(key, value).apply()
@@ -203,7 +183,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _language.value = lang
     }
 
-    // --- 节点管理与连接 ---
+    // --- 节点管理与连接 (保持原样) ---
 
     fun refreshNodes() {
         viewModelScope.launch {
@@ -238,13 +218,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun selectNode(node: Node) {
-        // 更新 UI 当前选中状态
         val updatedNode = node.copy(isSelected = true)
         _currentNode.value = updatedNode
         addLog("[系统] 已选择: ${node.tag}")
 
         viewModelScope.launch {
-            // 遍历更新整个列表的 isSelected 字段，确保唯一选中
             val currentList = _nodes.value.map { 
                 if (it.server == node.server && it.port == node.port && 
                     it.protocol == node.protocol && it.tag == node.tag) {
@@ -258,11 +236,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    // [新增] 添加新节点方法
     fun addNode(node: Node) {
         viewModelScope.launch {
             val currentList = _nodes.value.toMutableList()
-            // 新增节点默认不选中，除非列表为空
             val nodeToSave = if (currentList.isEmpty()) node.copy(isSelected = true) else node.copy(isSelected = false)
             
             currentList.add(nodeToSave)
@@ -285,7 +261,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             
             if (_currentNode.value == node) {
                  if (currentList.isNotEmpty()) {
-                     // 如果删除了当前选中的节点，默认选第一个
                      val nextNode = currentList[0].copy(isSelected = true)
                      _currentNode.value = nextNode
                      val updatedList = currentList.mapIndexed { index, item ->
@@ -378,10 +353,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _logs.value = current
     }
 
+    // [新增并重写] generateConfigJson，注入 log_path
     private fun generateConfigJson(node: Node): String {
-        // [注意] 对于 Socks/Shadowsocks，核心通常通过 transport/type 字段判断是否启用 TLS
-        // 这里 useTls 主要用于 Vmess/Vless/Trojan 的 tls 对象生成
-        val useTls = node.protocol != "socks" && node.protocol != "shadowsocks"
+        val useTls = node.protocol != "socks" && node.protocol != "shadowsocks" && node.protocol != "socks5"
+        
+        // 自动计算日志文件路径 (位于 App 私有数据目录)
+        val logFile = getApplication<Application>().filesDir.absolutePath + "/mandala_core.log"
+        
         return """
         {
             "tag": "${node.tag}",
@@ -390,6 +368,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             "server_port": ${node.port},
             "password": "${node.password}",
             "uuid": "${node.uuid}",
+            "username": "${if(node.protocol == "socks5") node.uuid else ""}",
+            "log_path": "$logFile",
             "tls": { 
                 "enabled": $useTls, 
                 "server_name": "${if (node.sni.isEmpty()) node.server else node.sni}",
