@@ -41,17 +41,14 @@ type Stack struct {
 }
 
 func StartStack(fd int, cfg *config.OutboundConfig) (*Stack, error) {
-	// 1. 初始化网络栈选项
+	// 1. 初始化网络栈
 	opts := stack.Options{
 		NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol, ipv6.NewProtocol},
 		TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol},
 	}
-	
-	// 创建 gVisor 协议栈实例
-	s := stack.New(opts)
+	s := stack.New(opts) // s 是 *stack.Stack
 
-	// 2. 创建 TUN 设备适配器 (传入 MTU 1500)
-	// [修复] NewDevice 签名已更新，传入 MTU
+	// 2. 创建 TUN 设备 (传入 MTU 1500)
 	dev, err := NewDevice(fd, 1500)
 	if err != nil {
 		return nil, fmt.Errorf("创建 TUN 设备失败: %v", err)
@@ -76,7 +73,7 @@ func StartStack(fd int, cfg *config.OutboundConfig) (*Stack, error) {
 		return nil, fmt.Errorf("CreateNIC 失败: %v", err)
 	}
 
-	// 4. 设置默认路由
+	// 4. 设置路由表
 	s.SetRouteTable([]tcpip.Route{
 		{
 			Destination: header.IPv4EmptySubnet,
@@ -88,8 +85,8 @@ func StartStack(fd int, cfg *config.OutboundConfig) (*Stack, error) {
 		},
 	})
 
-	// 5. 设置传输层处理器
-	// [修复] 这里 s 是 *stack.Stack，直接传入 NewForwarder
+	// 5. 设置传输层处理
+	// [注意] NewForwarder 第一个参数需要 *stack.Stack
 	s.SetTransportProtocolHandler(tcp.ProtocolNumber, tcp.NewForwarder(s, 0, 10, st.handleTCP).HandlePacket)
 	s.SetTransportProtocolHandler(udp.ProtocolNumber, udp.NewForwarder(s, st.handleUDP).HandlePacket)
 
@@ -97,7 +94,7 @@ func StartStack(fd int, cfg *config.OutboundConfig) (*Stack, error) {
 	return st, nil
 }
 
-// handleTCP 处理 TCP 连接请求
+// handleTCP 处理 TCP 流量
 func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 	defer func() {
 		if err := recover(); err != nil {
@@ -106,19 +103,18 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 	}()
 
 	id := r.ID()
-	// 获取目标地址
 	targetHost := id.LocalAddress.String()
 	targetPort := int(id.LocalPort)
 
-	// 1. 拨号远程代理服务器
+	// 连接远程代理
 	remoteConn, dialErr := s.dialer.Dial()
 	if dialErr != nil {
-		r.Complete(true) // 发送 RST 拒绝连接
+		r.Complete(true)
 		return
 	}
 	defer remoteConn.Close()
 
-	// 2. 协议握手
+	// 握手
 	var payload []byte
 	var hErr error
 	isVless := false
@@ -126,15 +122,11 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 	switch strings.ToLower(s.config.Type) {
 	case "mandala":
 		client := protocol.NewMandalaClient(s.config.Username, s.config.Password)
-		
-		// 获取随机填充大小配置
 		noiseSize := 0
 		if s.config.Settings != nil && s.config.Settings.Noise {
 			noiseSize = s.config.Settings.NoiseSize
 		}
-		// 传入 noiseSize
 		payload, hErr = client.BuildHandshakePayload(targetHost, targetPort, noiseSize)
-
 	case "trojan":
 		payload, hErr = protocol.BuildTrojanPayload(s.config.Password, targetHost, targetPort)
 	case "vless":
@@ -151,7 +143,6 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 		return
 	}
 
-	// 发送握手数据
 	if len(payload) > 0 {
 		if _, err := remoteConn.Write(payload); err != nil {
 			r.Complete(true)
@@ -159,25 +150,23 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 		}
 	}
 
-	// VLESS 特殊处理
 	if isVless {
 		remoteConn = protocol.NewVlessConn(remoteConn)
 	}
 
-	// 3. 建立本地 TCP 连接端点
+	// 创建本地端点
 	var wq waiter.Queue
 	ep, err := r.CreateEndpoint(&wq)
 	if err != nil {
 		r.Complete(true)
 		return
 	}
-	r.Complete(false) // 完成握手，不发送 RST
+	r.Complete(false)
 
-	// 转换为 Go 标准 net.Conn
 	localConn := gonet.NewTCPConn(&wq, ep)
 	defer localConn.Close()
 
-	// 4. 双向转发
+	// 双向转发
 	go func() {
 		io.Copy(localConn, remoteConn)
 		localConn.CloseWrite()
@@ -186,41 +175,35 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 	io.Copy(remoteConn, localConn)
 }
 
-// handleUDP 分发 UDP 流量：DNS 劫持或普通 UDP NAT
+// handleUDP 处理 UDP 流量
 func (s *Stack) handleUDP(r *udp.ForwarderRequest) {
 	id := r.ID()
 	dstPort := id.LocalPort
 
-	// 创建端点
 	var wq waiter.Queue
 	ep, err := r.CreateEndpoint(&wq)
 	if err != nil {
 		return
 	}
 
-	// [修复] gonet.NewUDPConn 需要传入 s.stack (类型为 *stack.Stack)
+	// [修复] gonet.NewUDPConn 需要传入 gvisor stack 实例
 	localConn := gonet.NewUDPConn(s.stack, &wq, ep)
 
-	// 如果是 DNS 请求 (端口 53)，进行拦截处理
 	if dstPort == 53 {
 		go s.handleRemoteDNS(localConn)
 		return
 	}
 
-	// 其他 UDP 流量交给 NAT 管理器
-	// 获取目标地址
 	targetIP := id.LocalAddress.String()
 	targetPort := int(dstPort)
 	key := fmt.Sprintf("%s:%d", targetIP, targetPort)
 
-	// [修复] 使用新变量 errNat，避免与 tcpip.Error 类型的 err 冲突
 	session, errNat := s.nat.GetOrCreate(key, localConn, targetIP, targetPort)
 	if errNat != nil {
 		localConn.Close()
 		return
 	}
 
-	// 将本地 UDP 数据转发给远程代理
 	go func() {
 		buf := make([]byte, 4096)
 		for {
@@ -233,7 +216,7 @@ func (s *Stack) handleUDP(r *udp.ForwarderRequest) {
 	}()
 }
 
-// handleRemoteDNS 通过代理远程解析 DNS
+// handleRemoteDNS 处理 DNS
 func (s *Stack) handleRemoteDNS(conn *gonet.UDPConn) {
 	defer conn.Close()
 	conn.SetDeadline(time.Now().Add(5 * time.Second))
@@ -244,27 +227,23 @@ func (s *Stack) handleRemoteDNS(conn *gonet.UDPConn) {
 		return
 	}
 
-	// 1. 连接代理
 	proxyConn, err := s.dialer.Dial()
 	if err != nil {
 		return
 	}
 	defer proxyConn.Close()
 
-	// 2. 发送握手 (目标为 8.8.8.8:53)
 	var payload []byte
 	isVless := false
 
 	switch strings.ToLower(s.config.Type) {
 	case "mandala":
 		client := protocol.NewMandalaClient(s.config.Username, s.config.Password)
-		
 		noiseSize := 0
 		if s.config.Settings != nil && s.config.Settings.Noise {
 			noiseSize = s.config.Settings.NoiseSize
 		}
 		payload, _ = client.BuildHandshakePayload("8.8.8.8", 53, noiseSize)
-
 	case "trojan":
 		payload, _ = protocol.BuildTrojanPayload(s.config.Password, "8.8.8.8", 53)
 	case "vless":
@@ -284,7 +263,6 @@ func (s *Stack) handleRemoteDNS(conn *gonet.UDPConn) {
 		proxyConn = protocol.NewVlessConn(proxyConn)
 	}
 
-	// 3. 封装 DNS 请求 (UDP over TCP 需要长度前缀)
 	reqData := make([]byte, 2+n)
 	reqData[0] = byte(n >> 8)
 	reqData[1] = byte(n)
@@ -294,7 +272,6 @@ func (s *Stack) handleRemoteDNS(conn *gonet.UDPConn) {
 		return
 	}
 
-	// 4. 读取响应
 	lenBuf := make([]byte, 2)
 	if _, err := io.ReadFull(proxyConn, lenBuf); err != nil {
 		return
@@ -306,7 +283,6 @@ func (s *Stack) handleRemoteDNS(conn *gonet.UDPConn) {
 		return
 	}
 
-	// 写回本地 UDP 连接
 	conn.Write(respBuf)
 }
 
