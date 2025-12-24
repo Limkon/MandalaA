@@ -133,7 +133,8 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 	switch strings.ToLower(s.config.Type) {
 	case "mandala":
 		client := protocol.NewMandalaClient(s.config.Username, s.config.Password)
-		payload, hErr = client.BuildHandshakePayload(targetHost, targetPort)
+		// [修改] 传入 Noise 配置
+		payload, hErr = client.BuildHandshakePayload(targetHost, targetPort, s.config.Settings.Noise)
 	case "trojan":
 		payload, hErr = protocol.BuildTrojanPayload(s.config.Password, targetHost, targetPort)
 	case "vless":
@@ -264,7 +265,8 @@ func (s *Stack) handleRemoteDNS(conn *gonet.UDPConn) {
 	switch strings.ToLower(s.config.Type) {
 	case "mandala":
 		client := protocol.NewMandalaClient(s.config.Username, s.config.Password)
-		payload, _ = client.BuildHandshakePayload("8.8.8.8", 53)
+		// [修改] 传入 Noise 配置
+		payload, _ = client.BuildHandshakePayload("8.8.8.8", 53, s.config.Settings.Noise)
 	case "trojan":
 		payload, _ = protocol.BuildTrojanPayload(s.config.Password, "8.8.8.8", 53)
 	case "vless":
