@@ -15,6 +15,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
@@ -24,23 +25,25 @@ import com.example.mandala.viewmodel.MainViewModel
 
 @Composable
 fun SettingsScreen(viewModel: MainViewModel) {
+    // 收集 ViewModel 中的所有状态
     val strings by viewModel.appStrings.collectAsState()
     val vpnMode by viewModel.vpnMode.collectAsState()
     val allowInsecure by viewModel.allowInsecure.collectAsState()
     val tlsFragment by viewModel.tlsFragment.collectAsState()
-    val fragmentSize by viewModel.fragmentSize.collectAsState() // [新增]
+    val fragmentSize by viewModel.fragmentSize.collectAsState()
     val randomPadding by viewModel.randomPadding.collectAsState()
-    val noiseSize by viewModel.noiseSize.collectAsState() // [新增]
+    val noiseSize by viewModel.noiseSize.collectAsState()
     val localPort by viewModel.localPort.collectAsState()
     val loggingEnabled by viewModel.loggingEnabled.collectAsState()
     val themeMode by viewModel.themeMode.collectAsState()
     val language by viewModel.language.collectAsState()
 
+    // 弹窗显示状态
     var showPortDialog by remember { mutableStateOf(false) }
-    var showFragmentDialog by remember { mutableStateOf(false) } // [新增]
-    var showNoiseDialog by remember { mutableStateOf(false) }   // [新增]
+    var showFragmentDialog by remember { mutableStateOf(false) }
+    var showNoiseDialog by remember { mutableStateOf(false) }
 
-    // --- 弹窗逻辑集锦 ---
+    // --- 数值编辑弹窗逻辑 ---
 
     if (showPortDialog) {
         PortEditDialog(
@@ -75,6 +78,8 @@ fun SettingsScreen(viewModel: MainViewModel) {
         )
     }
 
+    // --- 界面布局 ---
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -100,15 +105,15 @@ fun SettingsScreen(viewModel: MainViewModel) {
             )
         }
 
-        // --- 协议参数 ---
+        // --- 协议参数 (核心功能) ---
         SettingSection(strings.protocolSettings) {
+            // TLS 分片开关与自定义大小
             SwitchSetting(
                 title = strings.tlsFragment,
                 subtitle = strings.tlsFragmentDesc,
                 checked = tlsFragment,
                 onCheckedChange = { viewModel.updateSetting("tls_fragment", it) }
             )
-            // [新增] 自定义分片大小入口
             if (tlsFragment) {
                 ClickableSetting(
                     title = strings.fragmentSize,
@@ -118,13 +123,13 @@ fun SettingsScreen(viewModel: MainViewModel) {
                 )
             }
 
+            // 随机填充开关与自定义范围
             SwitchSetting(
                 title = strings.randomPadding,
                 subtitle = strings.randomPaddingDesc,
                 checked = randomPadding,
                 onCheckedChange = { viewModel.updateSetting("random_padding", it) }
             )
-            // [新增] 自定义填充大小入口
             if (randomPadding) {
                 ClickableSetting(
                     title = strings.noiseSize,
@@ -134,6 +139,7 @@ fun SettingsScreen(viewModel: MainViewModel) {
                 )
             }
 
+            // 日志与本地端口
             SwitchSetting(
                 title = strings.enableLogging,
                 subtitle = strings.enableLoggingDesc,
@@ -162,6 +168,7 @@ fun SettingsScreen(viewModel: MainViewModel) {
                     viewModel.updateTheme(AppThemeMode.values()[index])
                 }
             )
+
             DropdownSetting(
                 title = strings.language,
                 currentValue = when(language) {
@@ -175,15 +182,24 @@ fun SettingsScreen(viewModel: MainViewModel) {
             )
         }
 
-        // --- 关于 ---
+        // --- 关于信息 ---
         SettingSection(strings.about) {
-            Text("Mandala Client v1.1.0", style = MaterialTheme.typography.bodyMedium, color = Color.Gray)
-            Text("Core: Go 1.23 / Gomobile", style = MaterialTheme.typography.bodyMedium, color = Color.Gray)
+            Text(
+                "Mandala Client v1.1.0",
+                style = MaterialTheme.typography.bodyMedium,
+                color = Color.Gray
+            )
+            Text(
+                "Core: Go 1.23 / Gomobile",
+                style = MaterialTheme.typography.bodyMedium,
+                color = Color.Gray
+            )
         }
     }
 }
 
 // --- 通用数值编辑弹窗组件 ---
+
 @Composable
 fun PortEditDialog(
     title: String,
@@ -207,13 +223,13 @@ fun PortEditDialog(
                         tempVal = it.filter { char -> char.isDigit() }
                         isError = false
                     },
-                    label = { Text("范围: ${range.first} - ${range.last}") },
+                    label = { Text("有效范围: ${range.first} - ${range.last}") },
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                     isError = isError,
                     singleLine = true
                 )
                 if (isError) {
-                    Text("输入无效", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                    Text("无效的输入值", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
                 }
             }
         },
@@ -234,21 +250,37 @@ fun PortEditDialog(
     )
 }
 
-// --- 其余 UI 封装组件保持不变 ---
+// --- 布局与 UI 封装组件 (完整无省略) ---
 
 @Composable
 fun SettingSection(title: String, content: @Composable ColumnScope.() -> Unit) {
-    Text(title, color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+    Text(
+        title,
+        color = MaterialTheme.colorScheme.primary,
+        style = MaterialTheme.typography.titleSmall,
+        fontWeight = FontWeight.Bold
+    )
     Spacer(modifier = Modifier.height(8.dp))
-    Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
-        Column(modifier = Modifier.padding(16.dp)) { content() }
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            content()
+        }
     }
     Spacer(modifier = Modifier.height(24.dp))
 }
 
 @Composable
 fun SwitchSetting(title: String, subtitle: String, checked: Boolean, onCheckedChange: (Boolean) -> Unit) {
-    Row(modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 8.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
         Column(modifier = Modifier.weight(1f)) {
             Text(title, style = MaterialTheme.typography.titleMedium)
             Text(subtitle, style = MaterialTheme.typography.bodySmall, color = Color.Gray)
@@ -258,8 +290,15 @@ fun SwitchSetting(title: String, subtitle: String, checked: Boolean, onCheckedCh
 }
 
 @Composable
-fun ClickableSetting(title: String, value: String, icon: androidx.compose.ui.graphics.vector.ImageVector, onClick: () -> Unit) {
-    Row(modifier = Modifier.fillMaxWidth().clickable(onClick = onClick).padding(vertical = 12.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+fun ClickableSetting(title: String, value: String, icon: ImageVector, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(vertical = 12.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
         Text(title, style = MaterialTheme.typography.titleMedium)
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(value, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Bold, color = Color.Gray)
@@ -272,16 +311,34 @@ fun ClickableSetting(title: String, value: String, icon: androidx.compose.ui.gra
 @Composable
 fun DropdownSetting(title: String, currentValue: String, options: List<String>, onOptionSelected: (Int) -> Unit) {
     var expanded by remember { mutableStateOf(false) }
-    Row(modifier = Modifier.fillMaxWidth().clickable { expanded = true }.padding(vertical = 12.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { expanded = true }
+            .padding(vertical = 12.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
         Text(title, style = MaterialTheme.typography.titleMedium)
+        
         Box {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(currentValue, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
-                Icon(com.example.mandala.MainActivity().let { Icons.Default.ArrowDropDown }, contentDescription = null)
+                Icon(Icons.Default.ArrowDropDown, contentDescription = null)
             }
-            DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            DropdownMenu(
+                expanded = expanded,
+                onDismissRequest = { expanded = false }
+            ) {
                 options.forEachIndexed { index, label ->
-                    DropdownMenuItem(text = { Text(label) }, onClick = { onOptionSelected(index); expanded = false })
+                    DropdownMenuItem(
+                        text = { Text(label) },
+                        onClick = {
+                            onOptionSelected(index)
+                            expanded = false
+                        }
+                    )
                 }
             }
         }
