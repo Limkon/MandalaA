@@ -1,69 +1,134 @@
 package tun
 
 import (
-	"fmt"
-	"log"
 	"os"
 	"syscall"
 
-	"gvisor.dev/gvisor/pkg/tcpip/link/fdbased"
+	"gvisor.dev/gvisor/pkg/tcpip"
+	"gvisor.dev/gvisor/pkg/tcpip/buffer"
+	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 )
 
+// Device 实现 stack.LinkEndpoint 接口
 type Device struct {
-	fd   int
-	file *os.File
-	mtu  uint32
+	fd         int
+	mtu        uint32
+	dispatcher stack.NetworkDispatcher
 }
 
+// [修复] 增加 mtu 参数
 func NewDevice(fd int, mtu uint32) (*Device, error) {
-	log.Printf("GoLog: [Device] Init - FD: %d, MTU: %d", fd, mtu)
-
-	// 1. 强制设置为非阻塞模式
-	if err := syscall.SetNonblock(fd, true); err != nil {
-		log.Printf("GoLog: [Device] CRITICAL - Failed to set non-blocking: %v", err)
-		return nil, fmt.Errorf("set nonblock: %v", err)
-	}
-
-	f := os.NewFile(uintptr(fd), "tun")
-	
 	return &Device{
-		fd:   fd,
-		file: f,
-		mtu:  mtu,
+		fd:  fd,
+		mtu: mtu,
 	}, nil
 }
 
-func (d *Device) LinkEndpoint() stack.LinkEndpoint {
-	// [关键修复] 创建 Endpoint 配置
-	ep, err := fdbased.New(&fdbased.Options{
-		FDs: []int{d.fd},
-		MTU: d.mtu,
-		
-		// 必须关闭 EthernetHeader，因为是 L3 TUN 设备
-		EthernetHeader: false,
-		
-		// [必须为 true] 告诉 gVisor 不要校验接收到的包，直接认为是有效的。
-		// Android 系统往往不计算伪头部校验和，设为 false 会导致所有入站包被丢弃(RX=0)。
-		RXChecksumOffload: true, 
-		
-		// [必须为 false] 告诉 gVisor 在发给 Android 前必须计算好校验和。
-		// Android 内核若收到校验和错误的包会丢弃。
-		TXChecksumOffload: false,
-	})
+// 实现 LinkEndpoint 接口所需的方法
 
-	if err != nil {
-		log.Printf("GoLog: [Device] Failed to create endpoint: %v", err)
-		return nil
-	}
-
-	log.Println("GoLog: [Device] Endpoint created. Checksum Offload Corrected.")
-	return ep
+func (d *Device) MTU() uint32 {
+	return d.mtu
 }
 
-func (d *Device) Close() {
-	log.Println("GoLog: [Device] Closing...")
-	if d.file != nil {
-		d.file.Close()
+func (d *Device) Capabilities() stack.LinkEndpointCapabilities {
+	return stack.CapabilityNone
+}
+
+func (d *Device) MaxHeaderLength() uint16 {
+	return 0
+}
+
+func (d *Device) LinkAddress() tcpip.LinkAddress {
+	return ""
+}
+
+func (d *Device) WritePackets(pkts stack.PacketBufferList) (int, tcpip.Error) {
+	// 简单实现：遍历写入
+	count := 0
+	for _, pkt := range pkts.AsSlice() {
+		if err := d.writePacket(pkt); err != nil {
+			break
+		}
+		count++
 	}
+	return count, nil
+}
+
+func (d *Device) writePacket(pkt *stack.PacketBuffer) tcpip.Error {
+	// 获取数据视图
+	views := pkt.ToView().ToVectorisedView()
+	// 将数据合并为一个字节切片
+	data := views.ToView()
+
+	// 写入 TUN 设备
+	if _, err := syscall.Write(d.fd, data); err != nil {
+		return &tcpip.ErrInvalidOption{} // 返回通用错误
+	}
+	return nil
+}
+
+func (d *Device) Attach(dispatcher stack.NetworkDispatcher) {
+	d.dispatcher = dispatcher
+	// 启动读取循环
+	// 在 gVisor 集成中，我们需要一个机制将读取到的数据注入 dispatcher。
+	go d.readLoop()
+}
+
+func (d *Device) IsAttached() bool {
+	return d.dispatcher != nil
+}
+
+func (d *Device) Wait() {}
+
+// [修复] 实现缺失的 ARPHardwareType 方法
+func (d *Device) ARPHardwareType() header.ARPHardwareType {
+	return header.ARPHardwareNone
+}
+
+func (d *Device) AddHeader(pkt *stack.PacketBuffer) {}
+func (d *Device) ParseHeader(pkt *stack.PacketBuffer) bool { return true }
+
+// readLoop 从文件描述符读取数据并分发给网络栈
+func (d *Device) readLoop() {
+	buf := make([]byte, d.mtu)
+	for {
+		n, err := syscall.Read(d.fd, buf)
+		if err != nil {
+			return
+		}
+		if n <= 0 {
+			continue
+		}
+
+		// 复制数据，因为 buffer 会被重用
+		data := make([]byte, n)
+		copy(data, buf[:n])
+
+		pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
+			Payload: buffer.MakeWithData(buffer.View(data)),
+		})
+
+		// 判断 IP 版本 (IPv4 vs IPv6)
+		var proto tcpip.NetworkProtocolNumber
+		if n > 0 {
+			switch data[0] >> 4 {
+			case 4:
+				proto = header.IPv4ProtocolNumber
+			case 6:
+				proto = header.IPv6ProtocolNumber
+			default:
+				continue
+			}
+		}
+
+		if d.dispatcher != nil {
+			d.dispatcher.DeliverNetworkPacket(proto, pkt)
+		}
+		pkt.DecRef()
+	}
+}
+
+func (d *Device) Close() error {
+	return os.NewFile(uintptr(d.fd), "tun").Close()
 }
