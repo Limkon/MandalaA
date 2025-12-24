@@ -14,7 +14,7 @@ android {
         minSdk = 24
         targetSdk = 34
         versionCode = 1
-        versionName = "1.0"
+        versionName = "1.1" // 升级版本号
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -42,7 +42,6 @@ android {
         kotlinCompilerExtensionVersion = "1.5.4"
     }
     
-    // NDK Strip 配置 (保持这个，防止 NDK 错误)
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
@@ -63,8 +62,10 @@ dependencies {
     // 自动加载 libs 目录下的 mandala.aar
     implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("*.aar"))))
 
-    // [关键修复] 添加 Gson 依赖
+    // 关键依赖
     implementation("com.google.code.gson:gson:2.10.1")
+    implementation("com.squareup.okhttp3:okhttp:4.12.0") // [新增] 网络请求
+    implementation("androidx.work:work-runtime-ktx:2.9.0") // [新增] 定时任务
 
     // Android 核心库
     implementation("androidx.core:core-ktx:1.12.0")
