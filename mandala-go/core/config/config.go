@@ -6,7 +6,6 @@ import (
 )
 
 // OutboundConfig 定义了单个代理节点的配置信息
-// 对应原项目 config.c 中 ParseNodeConfigToGlobal 解析的字段
 type OutboundConfig struct {
 	Tag        string `json:"tag"`
 	Type       string `json:"type"` // 协议类型: "mandala", "vless", "trojan", "shadowsocks", "socks"
@@ -24,6 +23,18 @@ type OutboundConfig struct {
 	// 高级配置
 	TLS       *TLSConfig       `json:"tls,omitempty"`
 	Transport *TransportConfig `json:"transport,omitempty"`
+
+	// [新增] 协议功能设置，对应 Android 端生成的 settings 字段
+	Settings *ProtocolSettings `json:"settings,omitempty"`
+}
+
+// [新增] ProtocolSettings 定义核心功能的开关与自定义参数
+type ProtocolSettings struct {
+	VpnMode      bool `json:"vpn_mode"`      // 是否开启 VPN 模式
+	Fragment     bool `json:"fragment"`      // 是否开启 TLS 分片
+	FragmentSize int  `json:"fragment_size"` // 自定义分片大小 (字节)
+	Noise        bool `json:"noise"`         // 是否开启随机填充
+	NoiseSize    int  `json:"noise_size"`    // 自定义最大填充大小 (字节)
 }
 
 // TLSConfig 定义 TLS 相关配置
@@ -42,19 +53,13 @@ type TransportConfig struct {
 
 // Config 是传递给核心启动函数的总配置结构
 type Config struct {
-	// 目前我们只需要关注出站代理配置
-	// Android 端通常每次只选中一个节点运行，所以这里也可以简化为单个 OutboundConfig
-	// 但为了兼容性和扩展性，我们保留列表形式或直接使用单个对象
 	CurrentNode *OutboundConfig `json:"current_node"`
-	
-	// 全局设置 (对应 set.ini 中的部分设置)
-	LocalPort int  `json:"local_port"`
+	LocalPort   int  `json:"local_port"`
 	Debug     bool `json:"debug"`
 }
 
 // ParseConfig 解析 JSON 字符串为配置对象
 func ParseConfig(jsonStr string) (*OutboundConfig, error) {
-	// 为了简化 Android 调用，我们假设传入的是单个节点的 JSON 配置
 	var cfg OutboundConfig
 	err := json.Unmarshal([]byte(jsonStr), &cfg)
 	if err != nil {
