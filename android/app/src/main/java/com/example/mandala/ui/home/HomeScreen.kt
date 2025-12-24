@@ -1,6 +1,7 @@
+// 文件路径: android/app/src/main/java/com/example/mandala/ui/home/HomeScreen.kt
+
 package com.example.mandala.ui.home
 
-import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
@@ -12,9 +13,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.draw.scale
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -26,17 +25,9 @@ fun HomeScreen(viewModel: MainViewModel) {
     val isConnected by viewModel.isConnected.collectAsState()
     val currentNode by viewModel.currentNode.collectAsState()
     val logs by viewModel.logs.collectAsState()
-    // [新增] 获取多语言字符串
     val strings by viewModel.appStrings.collectAsState()
 
-    val infiniteTransition = rememberInfiniteTransition(label = "spin_transition")
-    val angle by infiniteTransition.animateFloat(
-        initialValue = 0f,
-        targetValue = 360f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(2000, easing = LinearEasing)
-        ), label = "spin_angle"
-    )
+    // 已移除动画相关的 rememberInfiniteTransition 和 angle 变量以节省开销
 
     Column(
         modifier = Modifier
@@ -70,7 +61,6 @@ fun HomeScreen(viewModel: MainViewModel) {
             shape = RoundedCornerShape(16.dp)
         ) {
             Column(modifier = Modifier.padding(20.dp)) {
-                // 使用 strings.home 或其他合适标签，这里暂用 currentNode 的上一级标题
                 Text("Current Node", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
@@ -97,19 +87,7 @@ fun HomeScreen(viewModel: MainViewModel) {
 
         // --- 连接按钮 ---
         Box(contentAlignment = Alignment.Center) {
-            if (isConnected) {
-                Box(
-                    modifier = Modifier
-                        .size(180.dp)
-                        .rotate(angle)
-                        .background(
-                            brush = Brush.sweepGradient(
-                                listOf(MaterialTheme.colorScheme.primary.copy(alpha = 0.3f), Color.Transparent)
-                            ),
-                            shape = CircleShape
-                        )
-                )
-            }
+            // 已移除原本在 isConnected 为 true 时显示的旋转渐变背景 Box 层
 
             Button(
                 onClick = { viewModel.toggleConnection() },
