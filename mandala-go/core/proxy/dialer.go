@@ -16,9 +16,9 @@ import (
 )
 
 func init() {
-	// [修復] 初始化隨機數種子。
-	// 客戶端發送 WebSocket 幀必須進行 Mask 加密，
-	// 如果不初始化種子，Mask Key 將固定，會被部分防火牆識別。
+	// 初始化随机数种子。
+	// 客户端发送 WebSocket 帧必须进行 Mask 加密，
+	// 如果不初始化种子，Mask Key 将固定，会被部分防火墙识别。
 	rand.Seed(time.Now().UnixNano())
 }
 
@@ -46,8 +46,17 @@ func (d *Dialer) Dial() (net.Conn, error) {
 		if tlsConfig.ServerName == "" {
 			tlsConfig.ServerName = d.Config.Server
 		}
-		
-		tlsConn := tls.Client(conn, tlsConfig)
+
+		var tlsConn *tls.Conn
+		// [关键] 判断是否启用 TLS 分片
+		if d.Config.Settings.Fragment {
+			// 包装原始连接以执行分片写入
+			fragmentConn := &FragmentConn{Conn: conn, active: true}
+			tlsConn = tls.Client(fragmentConn, tlsConfig)
+		} else {
+			tlsConn = tls.Client(conn, tlsConfig)
+		}
+
 		if err := tlsConn.Handshake(); err != nil {
 			conn.Close()
 			return nil, fmt.Errorf("tls handshake failed: %v", err)
@@ -67,11 +76,40 @@ func (d *Dialer) Dial() (net.Conn, error) {
 	return conn, nil
 }
 
+// FragmentConn 用于在 TLS 握手初期拆分数据包
+type FragmentConn struct {
+	net.Conn
+	active bool
+}
+
+func (f *FragmentConn) Write(b []byte) (int, error) {
+	// 仅针对 TLS Client Hello (0x16) 进行首包拆分，通常长度会大于 50
+	if f.active && len(b) > 50 && b[0] == 0x16 {
+		f.active = false
+		// 将 5 字节的 TLS Header 与部分 Payload 分开写入
+		// 随机切分点：5 + (0-10)
+		cut := 5 + rand.Intn(10)
+		n1, err := f.Conn.Write(b[:cut])
+		if err != nil {
+			return n1, err
+		}
+		// 增加微小延迟干扰 DPI 分析
+		time.Sleep(time.Duration(rand.Intn(5)) * time.Millisecond)
+		n2, err := f.Conn.Write(b[cut:])
+		return n1 + n2, err
+	}
+	return f.Conn.Write(b)
+}
+
 func (d *Dialer) handshakeWebSocket(conn net.Conn) (net.Conn, error) {
 	path := d.Config.Transport.Path
-	if path == "" { path = "/" }
+	if path == "" {
+		path = "/"
+	}
 	host := d.Config.TLS.ServerName
-	if host == "" { host = d.Config.Server }
+	if host == "" {
+		host = d.Config.Server
+	}
 
 	key := make([]byte, 16)
 	rand.Read(key)
@@ -110,7 +148,7 @@ func (d *Dialer) handshakeWebSocket(conn net.Conn) (net.Conn, error) {
 type WSConn struct {
 	net.Conn
 	reader    *bufio.Reader
-	remaining int64 
+	remaining int64
 }
 
 func NewWSConn(c net.Conn, br *bufio.Reader) *WSConn {
@@ -119,7 +157,9 @@ func NewWSConn(c net.Conn, br *bufio.Reader) *WSConn {
 
 func (w *WSConn) Write(b []byte) (int, error) {
 	length := len(b)
-	if length == 0 { return 0, nil }
+	if length == 0 {
+		return 0, nil
+	}
 
 	buf := make([]byte, 0, 14+length)
 	buf = append(buf, 0x82) // Binary Frame
@@ -140,7 +180,7 @@ func (w *WSConn) Write(b []byte) (int, error) {
 
 	payloadStart := len(buf)
 	buf = append(buf, b...)
-	
+
 	for i := 0; i < length; i++ {
 		buf[payloadStart+i] ^= maskKey[i%4]
 	}
@@ -153,51 +193,74 @@ func (w *WSConn) Write(b []byte) (int, error) {
 
 func (w *WSConn) Read(b []byte) (int, error) {
 	for {
-		// 1. 如果當前幀還有數據，直接讀取
+		// 1. 如果当前帧还有数据，直接读取
 		if w.remaining > 0 {
 			limit := int64(len(b))
-			if w.remaining < limit { limit = w.remaining }
+			if w.remaining < limit {
+				limit = w.remaining
+			}
 			n, err := w.reader.Read(b[:limit])
-			if n > 0 { w.remaining -= int64(n) }
-			if n > 0 || err != nil { return n, err }
+			if n > 0 {
+				w.remaining -= int64(n)
+			}
+			if n > 0 || err != nil {
+				return n, err
+			}
 		}
 
-		// 2. 讀取新幀
+		// 2. 读取新帧
 		header, err := w.reader.ReadByte()
-		if err != nil { return 0, err }
-		
+		if err != nil {
+			return 0, err
+		}
+
 		opcode := header & 0x0F
 		lenByte, err := w.reader.ReadByte()
-		if err != nil { return 0, err }
+		if err != nil {
+			return 0, err
+		}
 
 		masked := (lenByte & 0x80) != 0
 		payloadLen := int64(lenByte & 0x7F)
 
 		if payloadLen == 126 {
 			lenBuf := make([]byte, 2)
-			if _, err := io.ReadFull(w.reader, lenBuf); err != nil { return 0, err }
+			if _, err := io.ReadFull(w.reader, lenBuf); err != nil {
+				return 0, err
+			}
 			payloadLen = int64(binary.BigEndian.Uint16(lenBuf))
 		} else if payloadLen == 127 {
 			lenBuf := make([]byte, 8)
-			if _, err := io.ReadFull(w.reader, lenBuf); err != nil { return 0, err }
+			if _, err := io.ReadFull(w.reader, lenBuf); err != nil {
+				return 0, err
+			}
 			payloadLen = int64(binary.BigEndian.Uint64(lenBuf))
 		}
 
 		if masked {
-			if _, err := io.CopyN(io.Discard, w.reader, 4); err != nil { return 0, err }
+			if _, err := io.CopyN(io.Discard, w.reader, 4); err != nil {
+				return 0, err
+			}
 		}
 
-		// 處理控制幀
+		// 处理控制帧
 		switch opcode {
-		case 0x8: return 0, io.EOF
+		case 0x8:
+			return 0, io.EOF
 		case 0x9, 0xA:
-			if payloadLen > 0 { io.CopyN(io.Discard, w.reader, payloadLen) }
+			if payloadLen > 0 {
+				io.CopyN(io.Discard, w.reader, payloadLen)
+			}
 			continue
 		case 0x0, 0x1, 0x2:
 			w.remaining = payloadLen
-			if w.remaining == 0 { continue }
+			if w.remaining == 0 {
+				continue
+			}
 		default:
-			if payloadLen > 0 { io.CopyN(io.Discard, w.reader, payloadLen) }
+			if payloadLen > 0 {
+				io.CopyN(io.Discard, w.reader, payloadLen)
+			}
 			continue
 		}
 	}
