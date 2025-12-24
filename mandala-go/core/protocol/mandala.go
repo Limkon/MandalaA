@@ -27,7 +27,8 @@ func NewMandalaClient(username, password string) *MandalaClient {
 }
 
 // BuildHandshakePayload 构造 Mandala 协议的握手包
-func (c *MandalaClient) BuildHandshakePayload(targetHost string, targetPort int) ([]byte, error) {
+// [修改] 增加 useNoise 参数，用于控制是否启用长随机填充
+func (c *MandalaClient) BuildHandshakePayload(targetHost string, targetPort int, useNoise bool) ([]byte, error) {
 	log.Printf("[Mandala] 开始构造握手包 -> %s:%d", targetHost, targetPort)
 
 	// 1. 生成随机 Salt (4 bytes)
@@ -50,21 +51,30 @@ func (c *MandalaClient) BuildHandshakePayload(targetHost string, targetPort int)
 	log.Printf("[Mandala] 密码哈希已生成 (56字节)")
 
 	// 2.2 随机填充 (Padding)
-	padLenByte := make([]byte, 1)
-	if _, err := io.ReadFull(rand.Reader, padLenByte); err != nil {
-		return nil, err
+	// [修改] 根据 useNoise 决定填充长度
+	var padLen int
+	if useNoise {
+		// 启用噪音模式：填充 32 ~ 159 字节
+		b := make([]byte, 1)
+		rand.Read(b)
+		padLen = 32 + int(b[0]%128)
+	} else {
+		// 标准模式：填充 0 ~ 15 字节
+		b := make([]byte, 1)
+		rand.Read(b)
+		padLen = int(b[0] % 16)
 	}
-	padLen := int(padLenByte[0] % 16)
-	buf.WriteByte(byte(padLen)) 
+
+	buf.WriteByte(byte(padLen)) // 写入填充长度字节
 
 	if padLen > 0 {
 		padding := make([]byte, padLen)
 		if _, err := io.ReadFull(rand.Reader, padding); err != nil {
 			return nil, err
 		}
-		buf.Write(padding) 
+		buf.Write(padding)
 	}
-	log.Printf("[Mandala] 添加随机填充长度: %d", padLen)
+	log.Printf("[Mandala] 添加随机填充长度: %d (Noise: %v)", padLen, useNoise)
 
 	// 2.3 指令 CMD (0x01 Connect)
 	buf.WriteByte(0x01)
