@@ -11,12 +11,12 @@ import java.nio.charset.StandardCharsets
 
 object NodeParser {
     
-    // [增强] 批量解析方法：增加对 Base64 编码订阅内容的自动识别与解码
+    // 批量解析方法
     fun parseList(text: String): List<Node> {
         var content = text.trim()
         val nodes = mutableListOf<Node>()
 
-        // 自动识别并尝试解码 Base64 (大多数 V2Ray/SS 订阅格式)
+        // 自动识别并尝试解码 Base64 (订阅格式)
         if (!content.contains("://")) {
             try {
                 val decoded = String(
@@ -25,16 +25,13 @@ object NodeParser {
                 )
                 content = decoded
             } catch (e: Exception) {
-                // 如果解码失败，保持原样按行解析
+                // 解码失败则按原样处理
             }
         }
 
-        // 使用正则按空白字符（换行、空格、制表符）分割
         val lines = content.split("\\s+".toRegex())
-        
         for (line in lines) {
             if (line.isNotBlank()) {
-                // 尝试解析每一行
                 parse(line)?.let { nodes.add(it) }
             }
         }
@@ -62,6 +59,8 @@ object NodeParser {
     private fun parseMandala(link: String): Node? {
         val uri = Uri.parse(link)
         val host = uri.host ?: return null
+        // 兼容 type 和 transport 参数
+        val transportParam = uri.getQueryParameter("type") ?: uri.getQueryParameter("transport")
         
         return Node(
             tag = uri.fragment?.let { Uri.decode(it) } ?: "未命名Mandala",
@@ -69,7 +68,7 @@ object NodeParser {
             server = host,
             port = if (uri.port > 0) uri.port else 443,
             password = uri.userInfo?.let { Uri.decode(it) } ?: "",
-            transport = if (uri.getQueryParameter("type") == "ws") "ws" else "tcp",
+            transport = if (transportParam == "ws") "ws" else "tcp",
             path = uri.getQueryParameter("path")?.let { Uri.decode(it) } ?: "/",
             sni = uri.getQueryParameter("sni") ?: ""
         )
@@ -115,13 +114,15 @@ object NodeParser {
 
     private fun parseTrojan(link: String): Node? {
         val uri = Uri.parse(link)
+        val transportParam = uri.getQueryParameter("type") ?: uri.getQueryParameter("transport")
+
         return Node(
             tag = uri.fragment?.let { Uri.decode(it) } ?: "未命名Trojan",
             protocol = "trojan",
             server = uri.host ?: return null,
             port = if (uri.port > 0) uri.port else 443,
             password = uri.userInfo?.let { Uri.decode(it) } ?: "",
-            transport = if (uri.getQueryParameter("type") == "ws") "ws" else "tcp",
+            transport = if (transportParam == "ws") "ws" else "tcp",
             path = uri.getQueryParameter("path") ?: "/",
             sni = uri.getQueryParameter("sni") ?: ""
         )
@@ -129,13 +130,15 @@ object NodeParser {
 
     private fun parseVless(link: String): Node? {
         val uri = Uri.parse(link)
+        val transportParam = uri.getQueryParameter("type") ?: uri.getQueryParameter("transport")
+
         return Node(
             tag = uri.fragment?.let { Uri.decode(it) } ?: "未命名VLESS",
             protocol = "vless",
             server = uri.host ?: return null,
             port = if (uri.port > 0) uri.port else 443,
             uuid = uri.userInfo?.let { Uri.decode(it) } ?: "",
-            transport = if (uri.getQueryParameter("type") == "ws") "ws" else "tcp",
+            transport = if (transportParam == "ws") "ws" else "tcp",
             path = uri.getQueryParameter("path") ?: "/",
             sni = uri.getQueryParameter("sni") ?: ""
         )
@@ -271,11 +274,12 @@ object NodeParser {
             }
         }
 
-        val type = uri.getQueryParameter("type")
+        // [关键修复] 兼容 type 和 transport 参数名
+        val transportParam = uri.getQueryParameter("type") ?: uri.getQueryParameter("transport")
         val path = uri.getQueryParameter("path")
         val sni = uri.getQueryParameter("sni")
         
-        val transport = if (type == "ws") "ws" else "tcp"
+        val transport = if (transportParam == "ws") "ws" else "tcp"
         val finalPath = path ?: "/"
         val finalSni = sni ?: ""
 
