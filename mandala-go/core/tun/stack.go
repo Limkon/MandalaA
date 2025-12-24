@@ -51,6 +51,7 @@ func StartStack(fd int, cfg *config.OutboundConfig) (*Stack, error) {
 	s := stack.New(opts)
 
 	// 2. 创建 TUN 设备适配器 (传入 MTU 1500)
+	// [修复] NewDevice 签名已更新，传入 MTU
 	dev, err := NewDevice(fd, 1500)
 	if err != nil {
 		return nil, fmt.Errorf("创建 TUN 设备失败: %v", err)
@@ -88,9 +89,8 @@ func StartStack(fd int, cfg *config.OutboundConfig) (*Stack, error) {
 	})
 
 	// 5. 设置传输层处理器
-	// [修复] tcp.NewForwarder 的第一个参数应该是 s (stack 实例)，而不是 s.stack
+	// [修复] 这里 s 是 *stack.Stack，直接传入 NewForwarder
 	s.SetTransportProtocolHandler(tcp.ProtocolNumber, tcp.NewForwarder(s, 0, 10, st.handleTCP).HandlePacket)
-	// [修复] 同上
 	s.SetTransportProtocolHandler(udp.ProtocolNumber, udp.NewForwarder(s, st.handleUDP).HandlePacket)
 
 	log.Println("GoLog: 网络栈启动完成")
@@ -198,7 +198,7 @@ func (s *Stack) handleUDP(r *udp.ForwarderRequest) {
 		return
 	}
 
-	// [修复] gonet.NewUDPConn 需要传入 stack 实例作为第一个参数
+	// [修复] gonet.NewUDPConn 需要传入 s.stack (类型为 *stack.Stack)
 	localConn := gonet.NewUDPConn(s.stack, &wq, ep)
 
 	// 如果是 DNS 请求 (端口 53)，进行拦截处理
