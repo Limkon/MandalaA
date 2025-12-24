@@ -16,10 +16,49 @@ import (
 )
 
 func init() {
-	// [修復] 初始化隨機數種子。
-	// 客戶端發送 WebSocket 幀必須進行 Mask 加密，
-	// 如果不初始化種子，Mask Key 將固定，會被部分防火牆識別。
+	// 初始化随机数种子，用于 WebSocket Mask Key 和分片随机延迟
 	rand.Seed(time.Now().UnixNano())
+}
+
+// [新增] FragmentConn 封装原生连接，实现数据写入时的物理分片
+// 主要用于在 TLS 握手阶段（ClientHello）将数据包切碎，绕过 DPI 特征识别
+type FragmentConn struct {
+	net.Conn
+	FragmentSize int
+	processed    int // 记录已处理的字节数，通常只对握手初期的包进行分片
+}
+
+func (f *FragmentConn) Write(b []byte) (n int, err error) {
+	// 如果未开启分片或已过敏感握手期（例如前 2KB），直接发送，避免影响后续速度
+	if f.FragmentSize <= 0 || f.processed > 2048 {
+		return f.Conn.Write(b)
+	}
+
+	written := 0
+	totalLen := len(b)
+	
+	for written < totalLen {
+		remaining := totalLen - written
+		chunkSize := f.FragmentSize
+		if remaining < chunkSize {
+			chunkSize = remaining
+		}
+
+		// 写入切片数据
+		nw, err := f.Conn.Write(b[written : written+chunkSize])
+		if err != nil {
+			return written, err
+		}
+		
+		written += nw
+		f.processed += nw
+		
+		// [关键] 在分片之间加入微小延迟，强制在网络层形成多个物理包
+		if written < totalLen {
+			time.Sleep(time.Millisecond * 5)
+		}
+	}
+	return written, nil
 }
 
 type Dialer struct {
@@ -32,11 +71,24 @@ func NewDialer(cfg *config.OutboundConfig) *Dialer {
 
 func (d *Dialer) Dial() (net.Conn, error) {
 	targetAddr := fmt.Sprintf("%s:%d", d.Config.Server, d.Config.ServerPort)
-	conn, err := net.DialTimeout("tcp", targetAddr, 5*time.Second)
+	// 建立基础 TCP 连接
+	rawConn, err := net.DialTimeout("tcp", targetAddr, 5*time.Second)
 	if err != nil {
 		return nil, err
 	}
 
+	var conn net.Conn = rawConn
+
+	// [功能补全] 如果配置中开启了分片且设置了有效大小，应用分片包装器
+	// 注意：必须在 TLS 握手之前应用，这样 ClientHello 才能被分片
+	if d.Config.Settings != nil && d.Config.Settings.Fragment && d.Config.Settings.FragmentSize > 0 {
+		conn = &FragmentConn{
+			Conn:         rawConn,
+			FragmentSize: d.Config.Settings.FragmentSize,
+		}
+	}
+
+	// 处理 TLS
 	if d.Config.TLS != nil && d.Config.TLS.Enabled {
 		tlsConfig := &tls.Config{
 			ServerName:         d.Config.TLS.ServerName,
@@ -55,6 +107,7 @@ func (d *Dialer) Dial() (net.Conn, error) {
 		conn = tlsConn
 	}
 
+	// 处理 WebSocket
 	if d.Config.Transport != nil && d.Config.Transport.Type == "ws" {
 		wsConn, err := d.handshakeWebSocket(conn)
 		if err != nil {
@@ -107,6 +160,7 @@ func (d *Dialer) handshakeWebSocket(conn net.Conn) (net.Conn, error) {
 	return NewWSConn(conn, br), nil
 }
 
+// WSConn 保持原有逻辑，用于处理 WebSocket 数据帧封装
 type WSConn struct {
 	net.Conn
 	reader    *bufio.Reader
@@ -121,6 +175,7 @@ func (w *WSConn) Write(b []byte) (int, error) {
 	length := len(b)
 	if length == 0 { return 0, nil }
 
+	// 预估头部长度，最大 14 字节
 	buf := make([]byte, 0, 14+length)
 	buf = append(buf, 0x82) // Binary Frame
 
@@ -153,7 +208,7 @@ func (w *WSConn) Write(b []byte) (int, error) {
 
 func (w *WSConn) Read(b []byte) (int, error) {
 	for {
-		// 1. 如果當前幀還有數據，直接讀取
+		// 1. 如果当前帧还有剩余数据，直接读取
 		if w.remaining > 0 {
 			limit := int64(len(b))
 			if w.remaining < limit { limit = w.remaining }
@@ -162,7 +217,7 @@ func (w *WSConn) Read(b []byte) (int, error) {
 			if n > 0 || err != nil { return n, err }
 		}
 
-		// 2. 讀取新幀
+		// 2. 读取新帧头部
 		header, err := w.reader.ReadByte()
 		if err != nil { return 0, err }
 		
@@ -183,20 +238,23 @@ func (w *WSConn) Read(b []byte) (int, error) {
 			payloadLen = int64(binary.BigEndian.Uint64(lenBuf))
 		}
 
+		// 客户端通常不需要处理 Mask，但如果是 Masked 帧则丢弃 Mask Key
 		if masked {
 			if _, err := io.CopyN(io.Discard, w.reader, 4); err != nil { return 0, err }
 		}
 
-		// 處理控制幀
+		// 处理控制帧
 		switch opcode {
-		case 0x8: return 0, io.EOF
-		case 0x9, 0xA:
+		case 0x8: // Close
+			return 0, io.EOF
+		case 0x9, 0xA: // Ping/Pong
 			if payloadLen > 0 { io.CopyN(io.Discard, w.reader, payloadLen) }
 			continue
-		case 0x0, 0x1, 0x2:
+		case 0x0, 0x1, 0x2: // Continuation, Text, Binary
 			w.remaining = payloadLen
 			if w.remaining == 0 { continue }
 		default:
+			// 未知帧，跳过
 			if payloadLen > 0 { io.CopyN(io.Discard, w.reader, payloadLen) }
 			continue
 		}
