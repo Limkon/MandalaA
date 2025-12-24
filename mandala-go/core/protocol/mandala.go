@@ -26,16 +26,16 @@ func NewMandalaClient(username, password string) *MandalaClient {
 	}
 }
 
-// BuildHandshakePayload 构造 Mandala 协议的握手包
-func (c *MandalaClient) BuildHandshakePayload(targetHost string, targetPort int) ([]byte, error) {
-	log.Printf("[Mandala] 开始构造握手包 -> %s:%d", targetHost, targetPort)
+// [修改] BuildHandshakePayload 构造 Mandala 协议的握手包
+// 增加 noiseSize 参数：控制随机填充的最大长度
+func (c *MandalaClient) BuildHandshakePayload(targetHost string, targetPort int, noiseSize int) ([]byte, error) {
+	log.Printf("[Mandala] 开始构造握手包 -> %s:%d (最大填充: %d)", targetHost, targetPort, noiseSize)
 
 	// 1. 生成随机 Salt (4 bytes)
 	salt := make([]byte, 4)
 	if _, err := io.ReadFull(rand.Reader, salt); err != nil {
 		return nil, err
 	}
-	log.Printf("[Mandala] 生成随机 Salt: %x", salt)
 
 	// 2. 准备明文 Payload
 	var buf bytes.Buffer
@@ -47,24 +47,30 @@ func (c *MandalaClient) BuildHandshakePayload(targetHost string, targetPort int)
 		return nil, errors.New("hash generation failed")
 	}
 	buf.WriteString(hashHex)
-	log.Printf("[Mandala] 密码哈希已生成 (56字节)")
 
 	// 2.2 随机填充 (Padding)
-	padLenByte := make([]byte, 1)
-	if _, err := io.ReadFull(rand.Reader, padLenByte); err != nil {
-		return nil, err
+	padLen := 0
+	if noiseSize > 0 {
+		// 生成 0 到 noiseSize 之间的随机长度
+		// 读取 2 字节随机数用于取模
+		lenBuf := make([]byte, 2)
+		if _, err := io.ReadFull(rand.Reader, lenBuf); err == nil {
+			val := int(binary.BigEndian.Uint16(lenBuf))
+			padLen = val % (noiseSize + 1)
+		}
 	}
-	padLen := int(padLenByte[0] % 16)
-	buf.WriteByte(byte(padLen)) 
 
+	// 写入填充长度 (1 byte)
+	buf.WriteByte(byte(padLen))
+
+	// 写入填充内容
 	if padLen > 0 {
 		padding := make([]byte, padLen)
 		if _, err := io.ReadFull(rand.Reader, padding); err != nil {
 			return nil, err
 		}
-		buf.Write(padding) 
+		buf.Write(padding)
 	}
-	log.Printf("[Mandala] 添加随机填充长度: %d", padLen)
 
 	// 2.3 指令 CMD (0x01 Connect)
 	buf.WriteByte(0x01)
@@ -75,11 +81,9 @@ func (c *MandalaClient) BuildHandshakePayload(targetHost string, targetPort int)
 		if ip4 := ip.To4(); ip4 != nil {
 			buf.WriteByte(0x01)
 			buf.Write(ip4)
-			log.Printf("[Mandala] 目标类型: IPv4")
 		} else {
 			buf.WriteByte(0x04)
 			buf.Write(ip.To16())
-			log.Printf("[Mandala] 目标类型: IPv6")
 		}
 	} else {
 		if len(targetHost) > 255 {
@@ -88,7 +92,6 @@ func (c *MandalaClient) BuildHandshakePayload(targetHost string, targetPort int)
 		buf.WriteByte(0x03)
 		buf.WriteByte(byte(len(targetHost)))
 		buf.WriteString(targetHost)
-		log.Printf("[Mandala] 目标类型: 域名 (%s)", targetHost)
 	}
 
 	// 2.5 端口 (2 bytes Big Endian)
