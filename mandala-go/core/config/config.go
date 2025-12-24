@@ -12,14 +12,21 @@ type OutboundConfig struct {
 	Type       string `json:"type"` // 协议类型: "mandala", "vless", "trojan", "shadowsocks", "socks"
 	Server     string `json:"server"`
 	ServerPort int    `json:"server_port"`
-	
+
 	// 鉴权字段
 	UUID     string `json:"uuid,omitempty"`     // VLESS/VMess 使用
 	Password string `json:"password,omitempty"` // Mandala/Trojan/Shadowsocks 使用
 	Username string `json:"username,omitempty"` // SOCKS5 使用
 
-	// [新增] 日志配置
+	// 日志配置
 	LogPath string `json:"log_path,omitempty"` // 日志文件保存路径
+
+	// [新增] 协议混淆与高级设置，对应 Android 端的 settings 字段
+	Settings struct {
+		VpnMode  bool `json:"vpn_mode"`
+		Fragment bool `json:"fragment"` // TLS 分片开关
+		Noise    bool `json:"noise"`    // 随机填充开关
+	} `json:"settings"`
 
 	// 高级配置
 	TLS       *TLSConfig       `json:"tls,omitempty"`
@@ -44,9 +51,8 @@ type TransportConfig struct {
 type Config struct {
 	// 目前我们只需要关注出站代理配置
 	// Android 端通常每次只选中一个节点运行，所以这里也可以简化为单个 OutboundConfig
-	// 但为了兼容性和扩展性，我们保留列表形式或直接使用单个对象
 	CurrentNode *OutboundConfig `json:"current_node"`
-	
+
 	// 全局设置 (对应 set.ini 中的部分设置)
 	LocalPort int  `json:"local_port"`
 	Debug     bool `json:"debug"`
