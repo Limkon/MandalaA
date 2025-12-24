@@ -15,20 +15,25 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
-import com.example.mandala.viewmodel.MainViewModel
-import com.example.mandala.viewmodel.Node
+import com.example.mandala.viewmodel.*
 import kotlinx.coroutines.launch
+import java.text.SimpleDateFormat
+import java.util.*
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ProfilesScreen(viewModel: MainViewModel) {
     val nodes by viewModel.nodes.collectAsState()
-    var showEditDialog by remember { mutableStateOf(false) }
+    val subscriptions by viewModel.subscriptions.collectAsState()
+    val strings by viewModel.appStrings.collectAsState()
+    
+    var showNodeEditDialog by remember { mutableStateOf(false) }
+    var showSubManageDialog by remember { mutableStateOf(false) }
     var currentNode by remember { mutableStateOf<Node?>(null) }
     
-    // 剪贴板管理器
     val clipboardManager = LocalClipboardManager.current
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
@@ -40,32 +45,35 @@ fun ProfilesScreen(viewModel: MainViewModel) {
                 horizontalAlignment = Alignment.End,
                 verticalArrangement = Arrangement.spacedBy(16.dp)
             ) {
-                // [修复] 找回剪贴板导入功能
+                // 订阅管理入口
+                SmallFloatingActionButton(
+                    onClick = { showSubManageDialog = true },
+                    containerColor = MaterialTheme.colorScheme.tertiaryContainer
+                ) {
+                    Icon(Icons.Default.RssFeed, contentDescription = "Subscriptions")
+                }
+
+                // 剪贴板导入
                 SmallFloatingActionButton(
                     onClick = {
                         val clipData = clipboardManager.getText()
                         if (!clipData.isNullOrBlank()) {
-                            viewModel.importFromText(clipData.text) { success, msg ->
-                                scope.launch {
-                                    snackbarHostState.showSnackbar(msg)
-                                }
+                            viewModel.importFromText(clipData.text) { _, msg ->
+                                scope.launch { snackbarHostState.showSnackbar(msg) }
                             }
                         } else {
-                            scope.launch {
-                                snackbarHostState.showSnackbar("剪贴板为空")
-                            }
+                            scope.launch { snackbarHostState.showSnackbar(strings.clipboardEmpty) }
                         }
                     },
-                    containerColor = MaterialTheme.colorScheme.secondaryContainer,
-                    contentColor = MaterialTheme.colorScheme.onSecondaryContainer
+                    containerColor = MaterialTheme.colorScheme.secondaryContainer
                 ) {
-                    Icon(Icons.Default.ContentPaste, contentDescription = "Import from Clipboard")
+                    Icon(Icons.Default.ContentPaste, contentDescription = "Import")
                 }
 
-                // 添加节点按钮
+                // 添加节点
                 FloatingActionButton(onClick = {
-                    currentNode = null // 新建模式
-                    showEditDialog = true
+                    currentNode = null
+                    showNodeEditDialog = true
                 }) {
                     Icon(Icons.Default.Add, contentDescription = "Add Node")
                 }
@@ -74,21 +82,14 @@ fun ProfilesScreen(viewModel: MainViewModel) {
     ) { padding ->
         if (nodes.isEmpty()) {
             Box(modifier = Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) {
-                Text("暂无节点，请点击右下角导入或添加", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("暂无节点，请点击右下角导入或添加", color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         } else {
-            LazyColumn(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(padding)
-            ) {
+            LazyColumn(modifier = Modifier.fillMaxSize().padding(padding)) {
                 items(nodes) { node ->
                     NodeItem(
                         node = node,
-                        onEdit = {
-                            currentNode = node
-                            showEditDialog = true
-                        },
+                        onEdit = { currentNode = node; showNodeEditDialog = true },
                         onDelete = { viewModel.deleteNode(node) },
                         onSelect = { viewModel.selectNode(node) }
                     )
@@ -97,98 +98,190 @@ fun ProfilesScreen(viewModel: MainViewModel) {
         }
     }
 
-    if (showEditDialog) {
+    // 节点编辑弹窗
+    if (showNodeEditDialog) {
         NodeEditDialog(
             node = currentNode,
-            onDismiss = { showEditDialog = false },
+            onDismiss = { showNodeEditDialog = false },
             onSave = { newNode ->
-                if (currentNode == null) {
-                    viewModel.addNode(newNode)
-                } else {
-                    viewModel.updateNode(currentNode!!, newNode)
-                }
-                showEditDialog = false
+                if (currentNode == null) viewModel.addNode(newNode)
+                else viewModel.updateNode(currentNode!!, newNode)
+                showNodeEditDialog = false
             }
+        )
+    }
+
+    // 订阅管理弹窗
+    if (showSubManageDialog) {
+        SubscriptionManagementDialog(
+            viewModel = viewModel,
+            onDismiss = { showSubManageDialog = false }
         )
     }
 }
 
 @Composable
-fun NodeItem(
-    node: Node,
-    onEdit: () -> Unit,
-    onDelete: () -> Unit,
-    onSelect: () -> Unit
-) {
-    val cardColors = if (node.isSelected) {
-        CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)
-    } else {
-        CardDefaults.cardColors()
-    }
-
+fun NodeItem(node: Node, onEdit: () -> Unit, onDelete: () -> Unit, onSelect: () -> Unit) {
+    val cardColors = if (node.isSelected) CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer) else CardDefaults.cardColors()
     Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 8.dp)
-            .clickable { onSelect() },
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp).clickable { onSelect() },
         elevation = CardDefaults.cardElevation(2.dp),
         colors = cardColors
     ) {
-        Row(
-            modifier = Modifier.padding(16.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
+        Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(modifier = Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(text = node.tag, style = MaterialTheme.typography.titleMedium)
                     if (node.isSelected) {
                         Spacer(modifier = Modifier.width(8.dp))
-                        Icon(Icons.Default.CheckCircle, contentDescription = "Selected", modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary)
+                        Icon(Icons.Default.CheckCircle, null, modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary)
+                    }
+                    if (node.subscriptionUrl != null) {
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Icon(Icons.Default.CloudDownload, null, modifier = Modifier.size(14.dp), tint = MaterialTheme.colorScheme.outline)
                     }
                 }
-                Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    text = "${node.protocol.uppercase()} | ${node.server}:${node.port}",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                if (node.transport == "ws") {
-                    Text(text = "WebSocket: ${node.path}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.tertiary)
-                }
+                Text(text = "${node.protocol.uppercase()} | ${node.server}:${node.port}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            IconButton(onClick = onEdit) {
-                Icon(Icons.Default.Edit, contentDescription = "Edit")
-            }
-            IconButton(onClick = onDelete) {
-                Icon(Icons.Default.Delete, contentDescription = "Delete")
-            }
+            IconButton(onClick = onEdit) { Icon(Icons.Default.Edit, "Edit") }
+            IconButton(onClick = onDelete) { Icon(Icons.Default.Delete, "Delete") }
         }
     }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun NodeEditDialog(
-    node: Node?,
-    onDismiss: () -> Unit,
-    onSave: (Node) -> Unit
-) {
+fun SubscriptionManagementDialog(viewModel: MainViewModel, onDismiss: () -> Unit) {
+    val subs by viewModel.subscriptions.collectAsState()
+    val strings by viewModel.appStrings.collectAsState()
+    var showAddSubDialog by remember { mutableStateOf(false) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(strings.subscription) },
+        text = {
+            Column(modifier = Modifier.fillMaxWidth().heightIn(max = 400.dp)) {
+                if (subs.isEmpty()) {
+                    Text("尚未添加任何订阅", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(16.dp))
+                } else {
+                    LazyColumn {
+                        items(subs) { sub ->
+                            SubscriptionItem(sub, viewModel, strings)
+                        }
+                    }
+                }
+                TextButton(
+                    onClick = { showAddSubDialog = true },
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
+                ) {
+                    Icon(Icons.Default.Add, null)
+                    Spacer(Modifier.width(8.dp))
+                    Text(strings.addSubscription)
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text(strings.confirm) } }
+    )
+
+    if (showAddSubDialog) {
+        AddSubscriptionDialog(
+            strings = strings,
+            onDismiss = { showAddSubDialog = false },
+            onSave = { tag, url, interval, customDays ->
+                viewModel.addSubscription(Subscription(url, tag, interval = interval, customDays = customDays))
+                showAddSubDialog = false
+            }
+        )
+    }
+}
+
+@Composable
+fun SubscriptionItem(sub: Subscription, viewModel: MainViewModel, strings: AppStrings) {
+    val sdf = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault())
+    val lastUpdateStr = if (sub.lastUpdated == 0L) strings.neverUpdate else sdf.format(Date(sub.lastUpdated))
+
+    Card(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(sub.tag, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                IconButton(onClick = { viewModel.updateSubscriptionContent(sub) }, modifier = Modifier.size(24.dp)) {
+                    Icon(Icons.Default.Refresh, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
+                }
+                Spacer(Modifier.width(12.dp))
+                IconButton(onClick = { viewModel.deleteSubscription(sub) }, modifier = Modifier.size(24.dp)) {
+                    Icon(Icons.Default.Delete, null, tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(18.dp))
+                }
+            }
+            Text(sub.url, style = MaterialTheme.typography.labelSmall, maxLines = 1, color = MaterialTheme.colorScheme.outline)
+            Spacer(Modifier.height(4.dp))
+            Text("${strings.lastUpdate}: $lastUpdateStr", style = MaterialTheme.typography.labelSmall)
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun AddSubscriptionDialog(strings: AppStrings, onDismiss: () -> Unit, onSave: (String, String, UpdateInterval, Int) -> Unit) {
+    var tag by remember { mutableStateOf("") }
+    var url by remember { mutableStateOf("") }
+    var interval by remember { mutableStateOf(UpdateInterval.DAILY) }
+    var customDays by remember { mutableStateOf("1") }
+    var expandedInterval by remember { mutableStateOf(false) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(strings.addSubscription) },
+        text = {
+            Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                OutlinedTextField(value = tag, onValueChange = { tag = it }, label = { Text(strings.tag) }, singleLine = true)
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(value = url, onValueChange = { url = it }, label = { Text(strings.subUrl) }, singleLine = true)
+                Spacer(Modifier.height(16.dp))
+                
+                ExposedDropdownMenuBox(expanded = expandedInterval, onExpandedChange = { expandedInterval = !expandedInterval }) {
+                    OutlinedTextField(
+                        value = when(interval) {
+                            UpdateInterval.DAILY -> strings.daily
+                            UpdateInterval.WEEKLY -> strings.weekly
+                            UpdateInterval.CUSTOM -> strings.custom
+                        },
+                        onValueChange = {}, readOnly = true, label = { Text(strings.updateInterval) },
+                        trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expandedInterval) },
+                        modifier = Modifier.menuAnchor().fillMaxWidth()
+                    )
+                    ExposedDropdownMenu(expanded = expandedInterval, onDismissRequest = { expandedInterval = false }) {
+                        DropdownMenuItem(text = { Text(strings.daily) }, onClick = { interval = UpdateInterval.DAILY; expandedInterval = false })
+                        DropdownMenuItem(text = { Text(strings.weekly) }, onClick = { interval = UpdateInterval.WEEKLY; expandedInterval = false })
+                        DropdownMenuItem(text = { Text(strings.custom) }, onClick = { interval = UpdateInterval.CUSTOM; expandedInterval = false })
+                    }
+                }
+
+                if (interval == UpdateInterval.CUSTOM) {
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(value = customDays, onValueChange = { customDays = it.filter { it.isDigit() } }, label = { Text("天数") }, singleLine = true)
+                }
+            }
+        },
+        confirmButton = { Button(onClick = { onSave(tag, url, interval, customDays.toIntOrNull() ?: 1) }) { Text(strings.save) } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(strings.cancel) } }
+    )
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun NodeEditDialog(node: Node?, onDismiss: () -> Unit, onSave: (Node) -> Unit) {
     var tag by remember { mutableStateOf(node?.tag ?: "新节点") }
-    // [修复] 默认协议改为 vless，避免 vmess 出现在默认值
     var protocol by remember { mutableStateOf(node?.protocol ?: "vless") }
     var server by remember { mutableStateOf(node?.server ?: "") }
     var port by remember { mutableStateOf(node?.port?.toString() ?: "443") }
     var password by remember { mutableStateOf(node?.password ?: "") }
     var uuid by remember { mutableStateOf(node?.uuid ?: "") }
-    
     var transport by remember { mutableStateOf(node?.transport ?: "tcp") }
     var sni by remember { mutableStateOf(node?.sni ?: "") }
     var path by remember { mutableStateOf(node?.path ?: "/") }
-    
     var showAdvanced by remember { mutableStateOf(false) }
     var expandedProtocol by remember { mutableStateOf(false) }
 
-    // [修复] 移除 vmess，防止手动添加
     val protocols = listOf("vless", "trojan", "shadowsocks", "socks5", "mandala")
     val transports = listOf("tcp", "ws")
 
@@ -196,163 +289,40 @@ fun NodeEditDialog(
         onDismissRequest = onDismiss,
         title = { Text(text = if (node == null) "添加节点" else "编辑节点") },
         text = {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .verticalScroll(rememberScrollState())
-            ) {
-                // 1. 基础信息
-                OutlinedTextField(
-                    value = tag, onValueChange = { tag = it },
-                    label = { Text("备注 (Tag)") }, 
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true
-                )
-                
+            Column(modifier = Modifier.fillMaxWidth().verticalScroll(rememberScrollState())) {
+                OutlinedTextField(value = tag, onValueChange = { tag = it }, label = { Text("备注 (Tag)") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
                 Spacer(modifier = Modifier.height(8.dp))
-
-                // [修复] 布局混乱：改为下拉菜单选择协议
-                ExposedDropdownMenuBox(
-                    expanded = expandedProtocol,
-                    onExpandedChange = { expandedProtocol = !expandedProtocol },
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    OutlinedTextField(
-                        value = protocol.uppercase(),
-                        onValueChange = {},
-                        readOnly = true,
-                        label = { Text("协议类型") },
-                        trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expandedProtocol) },
-                        colors = ExposedDropdownMenuDefaults.outlinedTextFieldColors(),
-                        modifier = Modifier.menuAnchor().fillMaxWidth()
-                    )
-                    ExposedDropdownMenu(
-                        expanded = expandedProtocol,
-                        onDismissRequest = { expandedProtocol = false }
-                    ) {
-                        protocols.forEach { p ->
-                            DropdownMenuItem(
-                                text = { Text(p.uppercase()) },
-                                onClick = {
-                                    protocol = p
-                                    expandedProtocol = false
-                                }
-                            )
-                        }
+                ExposedDropdownMenuBox(expanded = expandedProtocol, onExpandedChange = { expandedProtocol = !expandedProtocol }, modifier = Modifier.fillMaxWidth()) {
+                    OutlinedTextField(value = protocol.uppercase(), onValueChange = {}, readOnly = true, label = { Text("协议类型") },
+                        trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expandedProtocol) }, modifier = Modifier.menuAnchor().fillMaxWidth())
+                    ExposedDropdownMenu(expanded = expandedProtocol, onDismissRequest = { expandedProtocol = false }) {
+                        protocols.forEach { p -> DropdownMenuItem(text = { Text(p.uppercase()) }, onClick = { protocol = p; expandedProtocol = false }) }
                     }
                 }
-
                 Spacer(modifier = Modifier.height(8.dp))
-                
-                // 地址和端口放在一行
                 Row(modifier = Modifier.fillMaxWidth()) {
-                    OutlinedTextField(
-                        value = server, onValueChange = { server = it },
-                        label = { Text("地址 (Host)") }, 
-                        modifier = Modifier.weight(0.65f),
-                        singleLine = true
-                    )
+                    OutlinedTextField(value = server, onValueChange = { server = it }, label = { Text("地址") }, modifier = Modifier.weight(0.65f), singleLine = true)
                     Spacer(modifier = Modifier.width(8.dp))
-                    OutlinedTextField(
-                        value = port, onValueChange = { port = it },
-                        label = { Text("端口") }, 
-                        modifier = Modifier.weight(0.35f),
-                        singleLine = true
-                    )
+                    OutlinedTextField(value = port, onValueChange = { port = it }, label = { Text("端口") }, modifier = Modifier.weight(0.35f), singleLine = true)
                 }
-
-                // 2. 认证信息
                 Spacer(modifier = Modifier.height(8.dp))
-                val uuidLabel = when (protocol) {
-                    "shadowsocks" -> "加密方式 (Cipher)"
-                    "socks5" -> "用户名 (User)"
-                    else -> "UUID / 用户ID"
-                }
-                
-                OutlinedTextField(
-                    value = uuid, onValueChange = { uuid = it },
-                    label = { Text(uuidLabel) }, 
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true
-                )
-
+                OutlinedTextField(value = uuid, onValueChange = { uuid = it }, label = { Text("UUID/用户名") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
                 Spacer(modifier = Modifier.height(8.dp))
-                OutlinedTextField(
-                    value = password, onValueChange = { password = it },
-                    label = { Text("密码 (Password)") },
-                    visualTransformation = PasswordVisualTransformation(),
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true
-                )
-
-                // 3. 高级设置
-                Spacer(modifier = Modifier.height(16.dp))
-                TextButton(
-                    onClick = { showAdvanced = !showAdvanced },
-                    modifier = Modifier.align(Alignment.Start)
-                ) {
-                    Text(if (showAdvanced) "收起高级设置" else "展开高级设置 (WS/TLS)")
-                }
-
+                OutlinedTextField(value = password, onValueChange = { password = it }, label = { Text("密码") }, visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth(), singleLine = true)
+                TextButton(onClick = { showAdvanced = !showAdvanced }) { Text(if (showAdvanced) "收起高级" else "展开高级 (WS/TLS)") }
                 if (showAdvanced) {
                     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
                         Column(modifier = Modifier.padding(12.dp)) {
-                            Text("传输方式", style = MaterialTheme.typography.labelMedium)
-                            Row(modifier = Modifier.fillMaxWidth()) {
-                                transports.forEach { t ->
-                                    FilterChip(
-                                        selected = (transport == t),
-                                        onClick = { transport = t },
-                                        label = { Text(t.uppercase()) },
-                                        modifier = Modifier.padding(end = 8.dp)
-                                    )
-                                }
-                            }
-
-                            if (transport == "ws") {
-                                OutlinedTextField(
-                                    value = path, onValueChange = { path = it },
-                                    label = { Text("WebSocket 路径") },
-                                    placeholder = { Text("/ws") },
-                                    modifier = Modifier.fillMaxWidth(),
-                                    singleLine = true
-                                )
-                            }
-
-                            Spacer(modifier = Modifier.height(8.dp))
-                            OutlinedTextField(
-                                value = sni, onValueChange = { sni = it },
-                                label = { Text("伪装域名 (SNI)") },
-                                placeholder = { Text("留空则使用Host") },
-                                modifier = Modifier.fillMaxWidth(),
-                                singleLine = true
-                            )
+                            Row { transports.forEach { t -> FilterChip(selected = (transport == t), onClick = { transport = t }, label = { Text(t.uppercase()) }, modifier = Modifier.padding(end = 8.dp)) } }
+                            if (transport == "ws") OutlinedTextField(value = path, onValueChange = { path = it }, label = { Text("WS 路径") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+                            Spacer(Modifier.height(8.dp))
+                            OutlinedTextField(value = sni, onValueChange = { sni = it }, label = { Text("SNI") }, placeholder = { Text("Host") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
                         }
                     }
                 }
             }
         },
-        confirmButton = {
-            Button(onClick = {
-                val p = port.toIntOrNull() ?: 443
-                val newNode = Node(
-                    tag = tag,
-                    protocol = protocol,
-                    server = server,
-                    port = p,
-                    password = password,
-                    uuid = uuid,
-                    transport = transport,
-                    path = path,
-                    sni = sni
-                )
-                onSave(newNode)
-            }) {
-                Text("保存")
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) { Text("取消") }
-        }
+        confirmButton = { Button(onClick = { onSave(Node(tag, protocol, server, port.toIntOrNull() ?: 443, password, uuid, transport, path, sni)) }) { Text("保存") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
     )
 }
