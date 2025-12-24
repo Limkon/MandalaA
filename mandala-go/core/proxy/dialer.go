@@ -1,5 +1,3 @@
-// 文件路径: mandala-go/core/proxy/dialer.go
-
 package proxy
 
 import (
@@ -36,11 +34,11 @@ func (d *Dialer) Dial() (net.Conn, error) {
 		return nil, err
 	}
 
-	// [新增] 如果启用分片，且不是 WebSocket 模式（WS 握手不建议在此层分片），则包装连接
+	// 如果启用分片且不是 WS 模式，包装连接以拆分第一个 TLS 包
 	if d.Config.Settings != nil && d.Config.Settings.TlsFragment && (d.Config.Transport == nil || d.Config.Transport.Type != "ws") {
 		size := d.Config.Settings.FragmentSize
 		if size <= 0 {
-			size = 5 // 默认分片大小
+			size = 5
 		}
 		conn = NewFragmentConn(conn, size)
 	}
@@ -58,7 +56,7 @@ func (d *Dialer) Dial() (net.Conn, error) {
 		tlsConn := tls.Client(conn, tlsConfig)
 		if err := tlsConn.Handshake(); err != nil {
 			conn.Close()
-			return nil, fmt.Errorf("tls handshake failed: %v", err)
+			return nil, fmt.Errorf("tls 握手失败: %v", err)
 		}
 		conn = tlsConn
 	}
@@ -67,7 +65,7 @@ func (d *Dialer) Dial() (net.Conn, error) {
 		wsConn, err := d.handshakeWebSocket(conn)
 		if err != nil {
 			conn.Close()
-			return nil, fmt.Errorf("websocket handshake failed: %v", err)
+			return nil, fmt.Errorf("websocket 握手失败: %v", err)
 		}
 		return wsConn, nil
 	}
@@ -78,8 +76,12 @@ func (d *Dialer) Dial() (net.Conn, error) {
 func (d *Dialer) handshakeWebSocket(conn net.Conn) (net.Conn, error) {
 	path := d.Config.Transport.Path
 	if path == "" { path = "/" }
-	host := d.Config.TLS.ServerName
-	if host == "" { host = d.Config.Server }
+	
+	// 修复：增加判空检查，防止 Config.TLS 为 nil 时崩溃
+	host := d.Config.Server
+	if d.Config.TLS != nil && d.Config.TLS.ServerName != "" {
+		host = d.Config.TLS.ServerName
+	}
 
 	key := make([]byte, 16)
 	rand.Read(key)
@@ -109,13 +111,11 @@ func (d *Dialer) handshakeWebSocket(conn net.Conn) (net.Conn, error) {
 		return nil, err
 	}
 	if resp.StatusCode != 101 {
-		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+		return nil, fmt.Errorf("非预期的状态码: %d", resp.StatusCode)
 	}
 
 	return NewWSConn(conn, br), nil
 }
-
-// --- [新增] FragmentConn 实现 ---
 
 type FragmentConn struct {
 	net.Conn
@@ -128,28 +128,18 @@ func NewFragmentConn(c net.Conn, size int) *FragmentConn {
 }
 
 func (f *FragmentConn) Write(b []byte) (int, error) {
-	// 如果已经分片过，或者数据包太小，或者不是 TLS 握手特征（可选），则直接写入
-	// 这里采用通用策略：仅对连接后的第一个大数据包执行一次性分片
 	if f.wasFragmented || len(b) <= f.fragmentSize {
 		return f.Conn.Write(b)
 	}
-
 	f.wasFragmented = true
-	// 写入第一段
 	n, err := f.Conn.Write(b[:f.fragmentSize])
 	if err != nil {
 		return n, err
 	}
-	
-	// 为了确保分片效果，可以轻微延迟后续写入
 	time.Sleep(1 * time.Millisecond)
-
-	// 写入剩余部分
 	m, err := f.Conn.Write(b[f.fragmentSize:])
 	return n + m, err
 }
-
-// --- WSConn 相关保持不变 ---
 
 type WSConn struct {
 	net.Conn
