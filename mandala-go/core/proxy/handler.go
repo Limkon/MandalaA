@@ -97,7 +97,8 @@ func (h *Handler) HandleConnection(localConn net.Conn) {
 	switch proxyType {
 	case "mandala":
 		client := protocol.NewMandalaClient(h.Config.Username, h.Config.Password)
-		payload, err := client.BuildHandshakePayload(targetHost, targetPort)
+		// [修改] 传入 Noise 配置
+		payload, err := client.BuildHandshakePayload(targetHost, targetPort, h.Config.Settings.Noise)
 		if err != nil {
 			log.Printf("[Mandala] Build payload failed: %v", err)
 			return
