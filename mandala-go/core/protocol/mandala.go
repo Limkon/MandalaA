@@ -1,5 +1,3 @@
-// 文件路径: mandala-go/core/protocol/mandala.go
-
 package protocol
 
 import (
@@ -29,9 +27,8 @@ func NewMandalaClient(username, password string) *MandalaClient {
 }
 
 // BuildHandshakePayload 构造 Mandala 协议的握手包
-// [修改] 增加 maxPadding 参数以支持自定义随机填充大小
-func (c *MandalaClient) BuildHandshakePayload(targetHost string, targetPort int, maxPadding int) ([]byte, error) {
-	log.Printf("[Mandala] 开始构造握手包 -> %s:%d (最大填充: %d)", targetHost, targetPort, maxPadding)
+func (c *MandalaClient) BuildHandshakePayload(targetHost string, targetPort int) ([]byte, error) {
+	log.Printf("[Mandala] 开始构造握手包 -> %s:%d", targetHost, targetPort)
 
 	// 1. 生成随机 Salt (4 bytes)
 	salt := make([]byte, 4)
@@ -53,19 +50,11 @@ func (c *MandalaClient) BuildHandshakePayload(targetHost string, targetPort int,
 	log.Printf("[Mandala] 密码哈希已生成 (56字节)")
 
 	// 2.2 随机填充 (Padding)
-	// [修改] 根据 maxPadding 动态计算填充长度
-	var padLen int
-	if maxPadding > 0 {
-		padLenByte := make([]byte, 1)
-		if _, err := io.ReadFull(rand.Reader, padLenByte); err != nil {
-			return nil, err
-		}
-		// 计算填充长度 (0 到 maxPadding-1)
-		padLen = int(padLenByte[0]) % maxPadding
-	} else {
-		padLen = 0
+	padLenByte := make([]byte, 1)
+	if _, err := io.ReadFull(rand.Reader, padLenByte); err != nil {
+		return nil, err
 	}
-
+	padLen := int(padLenByte[0] % 16)
 	buf.WriteByte(byte(padLen)) 
 
 	if padLen > 0 {

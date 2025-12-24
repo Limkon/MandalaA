@@ -35,9 +35,7 @@ data class AppStrings(
     val allowInsecure: String, val allowInsecureDesc: String,
     val protocolSettings: String,
     val tlsFragment: String, val tlsFragmentDesc: String,
-    val fragmentSize: String, // [新增]
     val randomPadding: String, val randomPaddingDesc: String,
-    val noiseSize: String,    // [新增]
     val localPort: String,
     val enableLogging: String,
     val enableLoggingDesc: String,
@@ -63,9 +61,7 @@ val ChineseStrings = AppStrings(
     allowInsecure = "允许不安全连接", allowInsecureDesc = "跳过 TLS 证书验证 (危险)",
     protocolSettings = "协议参数 (核心)",
     tlsFragment = "TLS 分片", tlsFragmentDesc = "拆分 TLS 记录以绕过 DPI 检测",
-    fragmentSize = "分片大小 (字节)", // [新增]
     randomPadding = "随机填充", randomPaddingDesc = "向数据包添加随机噪音",
-    noiseSize = "填充范围 (字节)",    // [新增]
     localPort = "本地监听端口",
     enableLogging = "启用日志记录",
     enableLoggingDesc = "将核心运行日志保存到本地文件以便调试",
@@ -91,9 +87,7 @@ val EnglishStrings = AppStrings(
     allowInsecure = "Insecure", allowInsecureDesc = "Skip TLS verification (Dangerous)",
     protocolSettings = "Protocol",
     tlsFragment = "TLS Fragment", tlsFragmentDesc = "Split TLS records to bypass DPI",
-    fragmentSize = "Fragment Size (Bytes)", // [新增]
     randomPadding = "Random Padding", randomPaddingDesc = "Add random noise to packets",
-    noiseSize = "Noise Size (Bytes)",      // [新增]
     localPort = "Local Port",
     enableLogging = "Enable Logging",
     enableLoggingDesc = "Save core logs to local file for debugging",
@@ -170,16 +164,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _tlsFragment = MutableStateFlow(prefs.getBoolean("tls_fragment", true))
     val tlsFragment = _tlsFragment.asStateFlow()
 
-    // [新增] 分片大小状态
-    private val _fragmentSize = MutableStateFlow(prefs.getInt("fragment_size", 5))
-    val fragmentSize = _fragmentSize.asStateFlow()
-
     private val _randomPadding = MutableStateFlow(prefs.getBoolean("random_padding", false))
     val randomPadding = _randomPadding.asStateFlow()
-
-    // [新增] 填充大小状态
-    private val _noiseSize = MutableStateFlow(prefs.getInt("noise_size", 100))
-    val noiseSize = _noiseSize.asStateFlow()
 
     private val _localPort = MutableStateFlow(prefs.getInt("local_port", 10809))
     val localPort = _localPort.asStateFlow()
@@ -224,24 +210,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             "tls_fragment" -> _tlsFragment.value = value
             "random_padding" -> _randomPadding.value = value
             "logging_enabled" -> _loggingEnabled.value = value
-        }
-    }
-
-    // [新增] 更新分片大小
-    fun updateFragmentSize(size: String) {
-        val s = size.toIntOrNull()
-        if (s != null && s in 1..500) {
-            prefs.edit().putInt("fragment_size", s).apply()
-            _fragmentSize.value = s
-        }
-    }
-
-    // [新增] 更新填充大小
-    fun updateNoiseSize(size: String) {
-        val s = size.toIntOrNull()
-        if (s != null && s in 1..2000) {
-            prefs.edit().putInt("noise_size", s).apply()
-            _noiseSize.value = s
         }
     }
 
@@ -302,6 +270,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val current = _subscriptions.value.toMutableList()
             val index = current.indexOfFirst { it.url == oldSub.url }
             if (index != -1) {
+                // 如果 URL 变更，处理关联节点和旧任务
                 if (oldSub.url != newSub.url) {
                     WorkManager.getInstance(getApplication()).cancelUniqueWork(oldSub.url)
                     val currentNodes = _nodes.value.toMutableList()
@@ -528,7 +497,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _logs.value = current
     }
 
-    // [修改] 补全分片和填充大小的 JSON 生成
     private fun generateConfigJson(node: Node): String {
         val useTls = node.sni.isNotEmpty() || node.transport == "ws" || node.port == 443
         val logPath = if (_loggingEnabled.value) {
@@ -548,13 +516,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             "log_path": "$logPath",
             "tls": { "enabled": $useTls, "server_name": "${if (node.sni.isEmpty()) node.server else node.sni}", "insecure": ${_allowInsecure.value} },
             "transport": { "type": "${node.transport}", "path": "${node.path}" },
-            "settings": { 
-                "vpn_mode": ${_vpnMode.value}, 
-                "fragment": ${_tlsFragment.value}, 
-                "fragment_size": ${_fragmentSize.value},
-                "noise": ${_randomPadding.value},
-                "noise_size": ${_noiseSize.value}
-            },
+            "settings": { "vpn_mode": ${_vpnMode.value}, "fragment": ${_tlsFragment.value}, "noise": ${_randomPadding.value} },
             "local_port": ${_localPort.value}
         }
         """.trimIndent()

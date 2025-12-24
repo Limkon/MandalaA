@@ -1,5 +1,3 @@
-// 文件路径: mandala-go/core/tun/stack.go
-
 package tun
 
 import (
@@ -43,7 +41,7 @@ type Stack struct {
 }
 
 func StartStack(fd int, mtu int, cfg *config.OutboundConfig) (*Stack, error) {
-	log.Printf("[Stack] 启动中 (FD: %d, MTU: %d, 类型: %s)", fd, mtu, cfg.Type)
+	log.Printf("[Stack] 启动中 (FD: %d, MTU: %d, Type: %s)", fd, mtu, cfg.Type)
 
 	dev, err := NewDevice(fd, uint32(mtu))
 	if err != nil {
@@ -117,7 +115,7 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 
 	id := r.ID()
 
-	// 1. 拨号代理 (内部已处理 TLS 分片逻辑)
+	// 1. 拨号代理
 	remoteConn, dialErr := s.dialer.Dial()
 	if dialErr != nil {
 		r.Complete(true)
@@ -132,27 +130,21 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 	targetPort := int(id.LocalPort)
 	isVless := false
 
-	// [新增] 获取填充大小逻辑
-	maxPadding := 0
-	if s.config.Settings != nil && s.config.Settings.RandomPadding {
-		maxPadding = s.config.Settings.NoiseSize
-		if maxPadding <= 0 {
-			maxPadding = 16 // 默认填充上限
-		}
-	}
-
 	switch strings.ToLower(s.config.Type) {
 	case "mandala":
 		client := protocol.NewMandalaClient(s.config.Username, s.config.Password)
-		// [修改] 传递 maxPadding 参数
-		payload, hErr = client.BuildHandshakePayload(targetHost, targetPort, maxPadding)
+		payload, hErr = client.BuildHandshakePayload(targetHost, targetPort)
 	case "trojan":
 		payload, hErr = protocol.BuildTrojanPayload(s.config.Password, targetHost, targetPort)
 	case "vless":
 		payload, hErr = protocol.BuildVlessPayload(s.config.UUID, targetHost, targetPort)
 		isVless = true
+
+	// [新增] Shadowsocks
 	case "shadowsocks":
 		payload, hErr = protocol.BuildShadowsocksPayload(targetHost, targetPort)
+
+	// [新增] SOCKS5 (交互式握手，无 Payload 生成)
 	case "socks", "socks5":
 		hErr = protocol.HandshakeSocks5(remoteConn, s.config.Username, s.config.Password, targetHost, targetPort)
 	}
@@ -162,7 +154,7 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 		return
 	}
 
-	// 发送握手包
+	// 发送握手包 (适用于 Mandala, Trojan, Vless, Shadowsocks)
 	if len(payload) > 0 {
 		if _, err := remoteConn.Write(payload); err != nil {
 			r.Complete(true)
@@ -170,6 +162,7 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 		}
 	}
 
+	// 如果是 VLESS，应用响应头剥离器
 	if isVless {
 		remoteConn = protocol.NewVlessConn(remoteConn)
 	}
@@ -229,6 +222,7 @@ func (s *Stack) handleUDP(r *udp.ForwarderRequest) {
 		return
 	}
 
+	// Local -> Remote 转发
 	go func() {
 		defer localConn.Close()
 		buf := make([]byte, 4096)
@@ -255,6 +249,7 @@ func (s *Stack) handleRemoteDNS(conn *gonet.UDPConn) {
 		return
 	}
 
+	// 1. 连接代理
 	proxyConn, err := s.dialer.Dial()
 	if err != nil {
 		log.Printf("[DNS] 代理连接失败: %v", err)
@@ -262,38 +257,43 @@ func (s *Stack) handleRemoteDNS(conn *gonet.UDPConn) {
 	}
 	defer proxyConn.Close()
 
+	// 2. 发送握手
 	var payload []byte
 	isVless := false
-
-	// DNS 请求同样应用填充设置
-	maxPadding := 0
-	if s.config.Settings != nil && s.config.Settings.RandomPadding {
-		maxPadding = s.config.Settings.NoiseSize
-	}
 
 	switch strings.ToLower(s.config.Type) {
 	case "mandala":
 		client := protocol.NewMandalaClient(s.config.Username, s.config.Password)
-		payload, _ = client.BuildHandshakePayload("8.8.8.8", 53, maxPadding)
+		payload, _ = client.BuildHandshakePayload("8.8.8.8", 53)
 	case "trojan":
 		payload, _ = protocol.BuildTrojanPayload(s.config.Password, "8.8.8.8", 53)
 	case "vless":
 		payload, _ = protocol.BuildVlessPayload(s.config.UUID, "8.8.8.8", 53)
 		isVless = true
+
+	// [新增] Shadowsocks
 	case "shadowsocks":
 		payload, _ = protocol.BuildShadowsocksPayload("8.8.8.8", 53)
+
+	// [新增] SOCKS5
 	case "socks", "socks5":
-		protocol.HandshakeSocks5(proxyConn, s.config.Username, s.config.Password, "8.8.8.8", 53)
+		if err := protocol.HandshakeSocks5(proxyConn, s.config.Username, s.config.Password, "8.8.8.8", 53); err != nil {
+			log.Printf("[DNS] Socks5握手失败: %v", err)
+			return
+		}
 	}
 
 	if len(payload) > 0 {
-		proxyConn.Write(payload)
+		if _, err := proxyConn.Write(payload); err != nil {
+			return
+		}
 	}
 
 	if isVless {
 		proxyConn = protocol.NewVlessConn(proxyConn)
 	}
 
+	// 3. 封装 DNS
 	reqData := make([]byte, 2+n)
 	reqData[0] = byte(n >> 8)
 	reqData[1] = byte(n)
@@ -303,6 +303,7 @@ func (s *Stack) handleRemoteDNS(conn *gonet.UDPConn) {
 		return
 	}
 
+	// 4. 读取响应
 	lenBuf := make([]byte, 2)
 	if _, err := io.ReadFull(proxyConn, lenBuf); err != nil {
 		return
@@ -314,23 +315,29 @@ func (s *Stack) handleRemoteDNS(conn *gonet.UDPConn) {
 		return
 	}
 
+	// 5. 写回 Android
 	conn.Write(respBuf)
 	log.Printf("[DNS] 解析完成")
 }
 
 func (s *Stack) Close() {
 	s.closeOnce.Do(func() {
-		log.Println("[Stack] 停止中...")
+		log.Println("[Stack] Stopping...")
+
 		if s.cancel != nil {
 			s.cancel()
 		}
+
 		time.Sleep(100 * time.Millisecond)
+
 		if s.device != nil {
 			s.device.Close()
 		}
+
 		if s.stack != nil {
 			s.stack.Close()
 		}
-		log.Println("[Stack] 已停止。")
+
+		log.Println("[Stack] Stopped.")
 	})
 }
