@@ -55,13 +55,19 @@ jobs:
         run: |
           echo "Building Mandala Core..."
           
-          # [关键修复] 强制获取最新依赖以支持 ECH (utls) 和 DNS 解析 (miekg/dns)
+          # [新增] 强制获取依赖库的最新版本
+          # 1. coder/websocket: 支持 HTTP/2 的 WebSocket 库
+          # 2. utls: 加密 ClientHello 支持 (使用 master 分支以获取最新 ECH 功能)
+          # 3. miekg/dns: DNS 解析库 (支持 HTTPS 记录)
+          # 4. x/net: 基础网络库
+          go get github.com/coder/websocket@v1.8.12
           go get github.com/refraction-networking/utls@master
           go get github.com/miekg/dns@latest
           go get golang.org/x/net@latest
           
           go mod tidy
-          # 只编译 arm64 和 arm，跳过 x86 和 x86_64
+          
+          # 只编译 arm64 和 arm，跳过 x86 和 x86_64 以节省时间
           gomobile bind -v \
             -target=android/arm64,android/arm \
             -androidapi 21 \
@@ -91,7 +97,7 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      # 安装 AAPT2 依赖库
+      # 安装 AAPT2 依赖库 (处理 32 位库兼容性问题)
       - name: Install libraries for AAPT2
         run: |
           sudo dpkg --add-architecture i386
