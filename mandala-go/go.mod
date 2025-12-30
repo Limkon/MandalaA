@@ -7,7 +7,11 @@ require (
 	golang.org/x/mobile v0.0.0-20231127183840-76ac6878050a
 	golang.org/x/mod v0.14.0 // 间接依赖
 	golang.org/x/tools v0.16.0 // 间接依赖
-	
+
+	// ECH 依赖 (uTLS 和 DNS 解析)
+	github.com/refraction-networking/utls v1.6.0
+	golang.org/x/net v0.19.0
+
 	// 项目依赖
 	golang.org/x/sys v0.15.0
 	golang.org/x/time v0.5.0
