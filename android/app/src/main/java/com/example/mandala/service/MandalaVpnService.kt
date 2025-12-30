@@ -1,3 +1,5 @@
+// 文件路径: android/app/src/main/java/com/example/mandala/service/MandalaVpnService.kt
+
 package com.example.mandala.service
 
 import android.app.NotificationChannel
@@ -9,13 +11,13 @@ import android.os.Build
 import android.os.ParcelFileDescriptor
 import androidx.core.app.NotificationCompat
 import com.example.mandala.MainActivity
+import com.example.mandala.R // [新增] 导入 R 类以引用资源
 import mobile.Mobile
 
 class MandalaVpnService : VpnService() {
     companion object {
         const val ACTION_START = "com.example.mandala.service.START"
         const val ACTION_STOP = "com.example.mandala.service.STOP"
-        // [新增] 停止广播 Action
         const val ACTION_VPN_STOPPED = "com.example.mandala.service.VPN_STOPPED"
         
         const val EXTRA_CONFIG = "config_json"
@@ -68,10 +70,12 @@ class MandalaVpnService : VpnService() {
             PendingIntent.getActivity(this, 0, it, PendingIntent.FLAG_IMMUTABLE)
         }
 
+        // [修改] 将 setSmallIcon 修改为使用应用的 ic_launcher
+        // 注意：如果要完美适配状态栏，建议制作一个纯白色的 ic_stat_name 图标
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Mandala VPN")
             .setContentText(content)
-            .setSmallIcon(android.R.drawable.ic_menu_share)
+            .setSmallIcon(R.mipmap.ic_launcher) // 这里修改为你的应用图标
             .setContentIntent(pendingIntent)
             .setOngoing(true)
             .build()
@@ -121,7 +125,6 @@ class MandalaVpnService : VpnService() {
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
 
-        // [关键] 发送停止广播，通知 ViewModel 更新状态
         sendBroadcast(Intent(ACTION_VPN_STOPPED).setPackage(packageName))
     }
 
