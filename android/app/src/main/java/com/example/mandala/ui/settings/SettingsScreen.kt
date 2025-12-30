@@ -31,12 +31,19 @@ fun SettingsScreen(viewModel: MainViewModel) {
     val tlsFragment by viewModel.tlsFragment.collectAsState()
     val randomPadding by viewModel.randomPadding.collectAsState()
     val localPort by viewModel.localPort.collectAsState()
-    val loggingEnabled by viewModel.loggingEnabled.collectAsState() // [新增]
+    val loggingEnabled by viewModel.loggingEnabled.collectAsState()
     val themeMode by viewModel.themeMode.collectAsState()
     val language by viewModel.language.collectAsState()
 
-    // 端口编辑弹窗状态
+    // [新增] ECH 相关状态
+    val enableEch by viewModel.enableEch.collectAsState()
+    val echPublicName by viewModel.echPublicName.collectAsState()
+    val echDoH by viewModel.echDoH.collectAsState()
+
+    // 弹窗状态
     var showPortDialog by remember { mutableStateOf(false) }
+    var showEchNameDialog by remember { mutableStateOf(false) }
+    var showEchDoHDialog by remember { mutableStateOf(false) }
 
     // 端口编辑逻辑
     if (showPortDialog) {
@@ -81,6 +88,32 @@ fun SettingsScreen(viewModel: MainViewModel) {
         )
     }
 
+    // [新增] ECH 域名编辑弹窗
+    if (showEchNameDialog) {
+        EditStringDialog(
+            title = strings.echPublicName,
+            initialValue = echPublicName,
+            onConfirm = { 
+                viewModel.updateStringSetting("ech_public_name", it)
+                showEchNameDialog = false
+            },
+            onDismiss = { showEchNameDialog = false }
+        )
+    }
+
+    // [新增] ECH DoH 编辑弹窗
+    if (showEchDoHDialog) {
+        EditStringDialog(
+            title = strings.echDoH,
+            initialValue = echDoH,
+            onConfirm = { 
+                viewModel.updateStringSetting("ech_doh_url", it)
+                showEchDoHDialog = false
+            },
+            onDismiss = { showEchDoHDialog = false }
+        )
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -120,14 +153,12 @@ fun SettingsScreen(viewModel: MainViewModel) {
                 checked = randomPadding,
                 onCheckedChange = { viewModel.updateSetting("random_padding", it) }
             )
-            // [新增] 日志开关
             SwitchSetting(
                 title = strings.enableLogging,
                 subtitle = strings.enableLoggingDesc,
                 checked = loggingEnabled,
                 onCheckedChange = { viewModel.updateSetting("logging_enabled", it) }
             )
-            // 可点击的端口设置
             ClickableSetting(
                 title = strings.localPort,
                 value = localPort.toString(),
@@ -136,9 +167,37 @@ fun SettingsScreen(viewModel: MainViewModel) {
             )
         }
 
-        // --- 应用设置 (主题与语言) ---
+        // [新增] ECH 设置区域
+        SettingSection(strings.echSettings) {
+            SwitchSetting(
+                title = strings.enableEch,
+                subtitle = strings.enableEchDesc,
+                checked = enableEch,
+                onCheckedChange = { viewModel.updateSetting("enable_ech", it) }
+            )
+            
+            // 只有开启 ECH 时才显示详细设置
+            if (enableEch) {
+                Divider(modifier = Modifier.padding(vertical = 8.dp), color = Color.LightGray.copy(alpha = 0.5f))
+                
+                ClickableSetting(
+                    title = strings.echPublicName,
+                    value = echPublicName.ifEmpty { "未设置" },
+                    icon = Icons.Default.Edit,
+                    onClick = { showEchNameDialog = true }
+                )
+                
+                ClickableSetting(
+                    title = strings.echDoH,
+                    value = echDoH.ifEmpty { "未设置" },
+                    icon = Icons.Default.Edit,
+                    onClick = { showEchDoHDialog = true }
+                )
+            }
+        }
+
+        // --- 应用设置 ---
         SettingSection(strings.appSettings) {
-            // 主题选择
             DropdownSetting(
                 title = strings.theme,
                 currentValue = when(themeMode) {
@@ -152,7 +211,6 @@ fun SettingsScreen(viewModel: MainViewModel) {
                 }
             )
 
-            // 语言选择
             DropdownSetting(
                 title = strings.language,
                 currentValue = when(language) {
@@ -169,12 +227,12 @@ fun SettingsScreen(viewModel: MainViewModel) {
         // --- 关于 ---
         SettingSection(strings.about) {
             Text(
-                "Mandala Client v1.1.0",
+                "Mandala Client v1.2.0 (ECH Enabled)",
                 style = MaterialTheme.typography.bodyMedium,
                 color = Color.Gray
             )
             Text(
-                "Core: Go 1.23 / Gomobile",
+                "Core: Go 1.20 / uTLS",
                 style = MaterialTheme.typography.bodyMedium,
                 color = Color.Gray
             )
@@ -229,12 +287,16 @@ fun ClickableSetting(title: String, value: String, icon: androidx.compose.ui.gra
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Text(title, style = MaterialTheme.typography.titleMedium)
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(value, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Bold, color = Color.Gray)
-            Spacer(modifier = Modifier.width(8.dp))
-            Icon(icon, contentDescription = null, tint = Color.Gray, modifier = Modifier.size(20.dp))
+        Column(modifier = Modifier.weight(1f)) {
+             Text(title, style = MaterialTheme.typography.titleMedium)
+             Text(
+                 value, 
+                 style = MaterialTheme.typography.bodyMedium, 
+                 color = Color.Gray,
+                 maxLines = 1
+             )
         }
+        Icon(icon, contentDescription = null, tint = Color.Gray, modifier = Modifier.size(20.dp))
     }
 }
 
@@ -273,4 +335,34 @@ fun DropdownSetting(title: String, currentValue: String, options: List<String>, 
             }
         }
     }
+}
+
+// [新增] 通用字符串编辑弹窗
+@Composable
+fun EditStringDialog(
+    title: String,
+    initialValue: String,
+    onConfirm: (String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var text by remember { mutableStateOf(initialValue) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(title) },
+        text = {
+            OutlinedTextField(
+                value = text,
+                onValueChange = { text = it },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth()
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = { onConfirm(text) }) { Text("确定") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("取消") }
+        }
+    )
 }
