@@ -28,10 +28,14 @@
             android:name=".MainActivity"
             android:exported="true"
             android:label="@string/app_name"
-            android:theme="@style/Theme.Mandala">
+            android:theme="@style/Theme.Mandala"
+            android:launchMode="singleTop">
+            
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+                
+                <action android:name="android.service.quicksettings.action.QS_TILE_PREFERENCES" />
             </intent-filter>
         </activity>
 
@@ -47,7 +51,7 @@
             <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                       android:value="vpn_connection" />
         </service>
-
+        
         <service
             android:name=".service.MandalaTileService"
             android:icon="@mipmap/ic_launcher"
