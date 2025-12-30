@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bufio"
+	"context"
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/binary"
@@ -10,15 +11,17 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"mandala/core/config"
+
+	utls "github.com/refraction-networking/utls"
+	"golang.org/x/net/dns/dnsmessage"
 )
 
 func init() {
 	// 初始化随机数种子。
-	// 客户端发送 WebSocket 帧必须进行 Mask 加密，
-	// 如果不初始化种子，Mask Key 将固定，会被部分防火墙识别。
 	rand.Seed(time.Now().UnixNano())
 }
 
@@ -38,32 +41,60 @@ func (d *Dialer) Dial() (net.Conn, error) {
 	}
 
 	if d.Config.TLS != nil && d.Config.TLS.Enabled {
-		tlsConfig := &tls.Config{
+		// [Step 1] 准备 ECH 配置
+		var echConfigList []byte
+		if d.Config.TLS.EnableECH && d.Config.TLS.ECHDoHURL != "" && d.Config.TLS.ECHPublicName != "" {
+			// 尝试解析 ECH 配置
+			// 注意：生产环境建议添加缓存机制，避免每次连接都进行 DNS 查询
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			configs, err := resolveECHConfig(ctx, d.Config.TLS.ECHDoHURL, d.Config.TLS.ECHPublicName)
+			cancel()
+			
+			if err == nil && len(configs) > 0 {
+				echConfigList = configs
+				// fmt.Println("[ECH] Config fetched successfully")
+			} else {
+				// ECH 获取失败，可以选择降级或报错。这里选择降级为普通 TLS，但打印日志
+				fmt.Printf("[ECH] Warning: Fetch failed for %s: %v. Fallback to standard TLS.\n", d.Config.TLS.ECHPublicName, err)
+			}
+		}
+
+		// [Step 2] 构建 uTLS 配置
+		// uTLS 的 Config 结构体尽量兼容标准库，但多了 ECH 字段
+		uTlsConfig := &utls.Config{
 			ServerName:         d.Config.TLS.ServerName,
 			InsecureSkipVerify: d.Config.TLS.Insecure,
 			MinVersion:         tls.VersionTLS12,
-		}
-		if tlsConfig.ServerName == "" {
-			tlsConfig.ServerName = d.Config.Server
+			
+			// 填入解析到的 ECH 密钥 (如果为空，uTLS 会自动忽略，行为等同于普通 TLS)
+			EncryptedClientHelloConfigList: echConfigList,
 		}
 
-		var tlsConn *tls.Conn
-		// [关键] 判断是否启用 TLS 分片
+		if uTlsConfig.ServerName == "" {
+			uTlsConfig.ServerName = d.Config.Server
+		}
+
+		// [Step 3] 处理分片 (Fragment)
+		// 即使使用 uTLS，底层的 FragmentConn 依然有效，用于在 TCP 层拆分 ClientHello
+		var uConn *utls.UConn
 		if d.Config.Settings.Fragment {
-			// 包装原始连接以执行分片写入
 			fragmentConn := &FragmentConn{Conn: conn, active: true}
-			tlsConn = tls.Client(fragmentConn, tlsConfig)
+			// 使用 uTLS 包装分片连接
+			// HelloChrome_Auto 模拟 Chrome 指纹，这是 ECH 能够成功伪装的关键
+			uConn = utls.UClient(fragmentConn, uTlsConfig, utls.HelloChrome_Auto)
 		} else {
-			tlsConn = tls.Client(conn, tlsConfig)
+			uConn = utls.UClient(conn, uTlsConfig, utls.HelloChrome_Auto)
 		}
 
-		if err := tlsConn.Handshake(); err != nil {
+		// [Step 4] 执行握手
+		if err := uConn.Handshake(); err != nil {
 			conn.Close()
-			return nil, fmt.Errorf("tls handshake failed: %v", err)
+			return nil, fmt.Errorf("utls handshake failed: %v", err)
 		}
-		conn = tlsConn
+		conn = uConn
 	}
 
+	// [Step 5] WebSocket 处理 (保持原有逻辑不变)
 	if d.Config.Transport != nil && d.Config.Transport.Type == "ws" {
 		wsConn, err := d.handshakeWebSocket(conn)
 		if err != nil {
@@ -76,24 +107,114 @@ func (d *Dialer) Dial() (net.Conn, error) {
 	return conn, nil
 }
 
-// FragmentConn 用于在 TLS 握手初期拆分数据包
+// resolveECHConfig 通过 DoH 获取 HTTPS 记录中的 ECH 配置
+func resolveECHConfig(ctx context.Context, dohURL string, domain string) ([]byte, error) {
+	// 1. 构造 DNS 查询 (Type 65 - HTTPS)
+	b := dnsmessage.NewBuilder(nil, dnsmessage.Header{
+		ID:                 0,
+		Response:           false,
+		OpCode:             0,
+		Authoritative:      false,
+		Truncated:          false,
+		RecursionDesired:   true,
+		RecursionAvailable: false,
+		RCode:              0,
+	})
+	b.StartQuestions()
+	b.Question(dnsmessage.Question{
+		Name:  dnsmessage.MustNewName(domain + "."),
+		Type:  65, // TypeHTTPS
+		Class: dnsmessage.ClassINET,
+	})
+	msg, err := b.Finish()
+	if err != nil {
+		return nil, err
+	}
+
+	// 2. 发送 DoH 请求
+	req, err := http.NewRequestWithContext(ctx, "POST", dohURL, strings.NewReader(string(msg)))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/dns-message")
+	req.Header.Set("Accept", "application/dns-message")
+
+	// 使用短超时的 Client
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("DoH status: %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	// 3. 解析 DNS 响应
+	var p dnsmessage.Parser
+	if _, err := p.Start(body); err != nil {
+		return nil, err
+	}
+	if err := p.SkipAllQuestions(); err != nil {
+		return nil, err
+	}
+
+	for {
+		h, err := p.AnswerHeader()
+		if err == dnsmessage.ErrSectionDone {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+
+		if h.Type == 65 { // HTTPS
+			r, err := p.HTTPSResource()
+			if err != nil {
+				// 解析资源体失败，跳过
+				if err := p.SkipAnswer(); err != nil {
+					return nil, err
+				}
+				continue
+			}
+			
+			// 遍历 Key-Value 对，寻找 ech (key=5)
+			for _, val := range r.Values {
+				if val.Key == 5 {
+					return val.Value, nil
+				}
+			}
+		}
+
+		if err := p.SkipAnswer(); err != nil {
+			return nil, err
+		}
+	}
+
+	return nil, fmt.Errorf("no ECH config found")
+}
+
+// FragmentConn 用于在 TLS 握手初期拆分数据包 (保持原有逻辑)
 type FragmentConn struct {
 	net.Conn
 	active bool
 }
 
 func (f *FragmentConn) Write(b []byte) (int, error) {
-	// 仅针对 TLS Client Hello (0x16) 进行首包拆分，通常长度会大于 50
+	// uTLS 的 ClientHello 依然符合 TLS 记录层格式 (0x16 开头)
 	if f.active && len(b) > 50 && b[0] == 0x16 {
 		f.active = false
-		// 将 5 字节的 TLS Header 与部分 Payload 分开写入
-		// 随机切分点：5 + (0-10)
 		cut := 5 + rand.Intn(10)
 		n1, err := f.Conn.Write(b[:cut])
 		if err != nil {
 			return n1, err
 		}
-		// 增加微小延迟干扰 DPI 分析
 		time.Sleep(time.Duration(rand.Intn(5)) * time.Millisecond)
 		n2, err := f.Conn.Write(b[cut:])
 		return n1 + n2, err
@@ -193,7 +314,6 @@ func (w *WSConn) Write(b []byte) (int, error) {
 
 func (w *WSConn) Read(b []byte) (int, error) {
 	for {
-		// 1. 如果当前帧还有数据，直接读取
 		if w.remaining > 0 {
 			limit := int64(len(b))
 			if w.remaining < limit {
@@ -208,7 +328,6 @@ func (w *WSConn) Read(b []byte) (int, error) {
 			}
 		}
 
-		// 2. 读取新帧
 		header, err := w.reader.ReadByte()
 		if err != nil {
 			return 0, err
@@ -243,7 +362,6 @@ func (w *WSConn) Read(b []byte) (int, error) {
 			}
 		}
 
-		// 处理控制帧
 		switch opcode {
 		case 0x8:
 			return 0, io.EOF
