@@ -60,7 +60,7 @@ func (d *Dialer) Dial() (net.Conn, error) {
 			ServerName:         d.Config.TLS.ServerName,
 			InsecureSkipVerify: d.Config.TLS.Insecure,
 			MinVersion:         tls.VersionTLS12,
-			// [关键修改] 显式声明只支持 http/1.1
+			// 显式声明只支持 http/1.1 (虽然会被 HelloCustom 覆盖，但作为兜底)
 			NextProtos:                     []string{"http/1.1"},
 			EncryptedClientHelloConfigList: echConfigList,
 		}
@@ -78,7 +78,12 @@ func (d *Dialer) Dial() (net.Conn, error) {
 		uConn = utls.UClient(conn, uTlsConfig, utls.HelloCustom)
 
 		// 1. 获取 Chrome 浏览器的默认指纹模版
-		spec := utls.HelloChrome_Auto.GetClientHelloSpec(uTlsConfig)
+		// [修复] 使用 UTLSIdToSpec 获取 Spec，而不是调用不存在的方法
+		spec, err := utls.UTLSIdToSpec(utls.HelloChrome_Auto)
+		if err != nil {
+			conn.Close()
+			return nil, fmt.Errorf("failed to get uTLS spec: %v", err)
+		}
 
 		// 2. 遍历指纹中的扩展，找到 ALPN 扩展
 		foundALPN := false
@@ -86,7 +91,7 @@ func (d *Dialer) Dial() (net.Conn, error) {
 			if alpn, ok := ext.(*utls.ALPNExtension); ok {
 				// 3. [核心操作] 强制将其修改为只支持 http/1.1
 				// 这会告诉服务器：“我虽然是 Chrome，但我这次只想用 HTTP/1.1”
-				// 这样服务器就不会发送 HTTP/2 数据，也就不会触发之前的 "invalid header" 错误
+				// 这样服务器就不会发送 HTTP/2 数据，也就不会触发 "invalid Upgrade header" 错误
 				alpn.AlpnProtocols = []string{"http/1.1"}
 				spec.Extensions[i] = alpn
 				foundALPN = true
@@ -100,7 +105,7 @@ func (d *Dialer) Dial() (net.Conn, error) {
 		}
 
 		// 4. 应用修补后的指纹
-		if err := uConn.ApplyPreset(spec); err != nil {
+		if err := uConn.ApplyPreset(&spec); err != nil {
 			conn.Close()
 			return nil, fmt.Errorf("apply preset failed: %v", err)
 		}
