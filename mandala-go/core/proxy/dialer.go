@@ -42,7 +42,6 @@ func (d *Dialer) Dial() (net.Conn, error) {
 	if d.Config.TLS != nil && d.Config.TLS.Enabled {
 		// [Step 1] 准备 ECH 配置
 		var echConfigList []byte
-		// 只有在开启 ECH 且参数完整时才去获取
 		if d.Config.TLS.EnableECH && d.Config.TLS.ECHDoHURL != "" && d.Config.TLS.ECHPublicName != "" {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			configs, err := resolveECHConfig(ctx, d.Config.TLS.ECHDoHURL, d.Config.TLS.ECHPublicName)
@@ -51,7 +50,6 @@ func (d *Dialer) Dial() (net.Conn, error) {
 			if err == nil && len(configs) > 0 {
 				echConfigList = configs
 			} else {
-				// 获取失败仅打印日志，不中断流程，尝试降级连接
 				fmt.Printf("[ECH] Warning: Fetch failed: %v. Fallback to standard TLS.\n", err)
 			}
 		}
@@ -61,12 +59,8 @@ func (d *Dialer) Dial() (net.Conn, error) {
 			ServerName:         d.Config.TLS.ServerName,
 			InsecureSkipVerify: d.Config.TLS.Insecure,
 			MinVersion:         tls.VersionTLS12,
-			
-			// [关键修复] 强制使用 HTTP/1.1
-			// WebSocket 握手代码是基于 HTTP/1.1 的，如果协商出 h2 (HTTP/2)，
-			// 服务器会发送二进制帧，导致 "malformed HTTP response" 错误。
-			NextProtos: []string{"http/1.1"},
-
+			// 这里设置 NextProtos 可能被 HelloChrome_Auto 忽略，所以下面需要手动修改 Spec
+			NextProtos:                     []string{"http/1.1"},
 			EncryptedClientHelloConfigList: echConfigList,
 		}
 
@@ -74,15 +68,48 @@ func (d *Dialer) Dial() (net.Conn, error) {
 			uTlsConfig.ServerName = d.Config.Server
 		}
 
-		// [Step 3] 处理分片与握手
+		// [Step 3] 构建 uTLS 连接 (关键修改：使用 HelloCustom 并手动修补 ALPN)
 		var uConn *utls.UConn
+		// 使用 HelloCustom 允许我们应用修改后的 Spec
 		if d.Config.Settings.Fragment {
 			fragmentConn := &FragmentConn{Conn: conn, active: true}
-			uConn = utls.UClient(fragmentConn, uTlsConfig, utls.HelloChrome_Auto)
+			uConn = utls.UClient(fragmentConn, uTlsConfig, utls.HelloCustom)
 		} else {
-			uConn = utls.UClient(conn, uTlsConfig, utls.HelloChrome_Auto)
+			uConn = utls.UClient(conn, uTlsConfig, utls.HelloCustom)
 		}
 
+		// --- 核心修复开始 ---
+		// 1. 获取 Chrome 浏览器的默认指纹模版
+		// 注意：uTLS 版本不同，GetClientHelloSpec 的签名可能不同，这里假设是返回 *ClientHelloSpec 无错误
+		// 如果编译报错说返回值数量不对，请告诉我，我调整代码
+		spec := utls.HelloChrome_Auto.GetClientHelloSpec(uTlsConfig)
+
+		// 2. 遍历指纹中的扩展，找到 ALPN 扩展
+		foundALPN := false
+		for i, ext := range spec.Extensions {
+			if alpn, ok := ext.(*utls.ALPNExtension); ok {
+				// 3. 强制将其修改为只支持 http/1.1
+				// 这样服务器就绝对不会发送 HTTP/2 数据了
+				alpn.AlpnProtocols = []string{"http/1.1"}
+				spec.Extensions[i] = alpn
+				foundALPN = true
+				break
+			}
+		}
+
+		// 如果原指纹没 ALPN (不太可能)，我们手动补一个
+		if !foundALPN {
+			spec.Extensions = append(spec.Extensions, &utls.ALPNExtension{AlpnProtocols: []string{"http/1.1"}})
+		}
+
+		// 4. 应用这个修补后的指纹
+		if err := uConn.ApplyPreset(spec); err != nil {
+			conn.Close()
+			return nil, fmt.Errorf("apply preset failed: %v", err)
+		}
+		// --- 核心修复结束 ---
+
+		// 执行握手
 		if err := uConn.Handshake(); err != nil {
 			conn.Close()
 			return nil, fmt.Errorf("utls handshake failed: %v", err)
@@ -103,11 +130,11 @@ func (d *Dialer) Dial() (net.Conn, error) {
 	return conn, nil
 }
 
-// resolveECHConfig 使用 miekg/dns 解析 DoH
+// resolveECHConfig 保持不变 (使用 miekg/dns)
 func resolveECHConfig(ctx context.Context, dohURL string, domain string) ([]byte, error) {
 	msg := new(dns.Msg)
 	msg.SetQuestion(dns.Fqdn(domain), dns.TypeHTTPS)
-	
+
 	data, err := msg.Pack()
 	if err != nil {
 		return nil, err
@@ -121,7 +148,6 @@ func resolveECHConfig(ctx context.Context, dohURL string, domain string) ([]byte
 	req.Header.Set("Accept", "application/dns-message")
 
 	client := &http.Client{
-		// 避免 DoH 客户端复用连接导致死锁或状态混乱
 		Transport: &http.Transport{
 			DisableKeepAlives: true,
 		},
@@ -149,6 +175,7 @@ func resolveECHConfig(ctx context.Context, dohURL string, domain string) ([]byte
 	for _, ans := range respMsg.Answer {
 		if https, ok := ans.(*dns.HTTPS); ok {
 			for _, val := range https.Value {
+				// 确认类型为 SVCBECHConfig
 				if ech, ok := val.(*dns.SVCBECHConfig); ok {
 					return ech.ECH, nil
 				}
