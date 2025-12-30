@@ -54,6 +54,11 @@ jobs:
         working-directory: ./mandala-go
         run: |
           echo "Building Mandala Core..."
+          
+          # [关键修复] 强制获取最新版依赖以支持 ECH 和 HTTPS 记录
+          go get github.com/refraction-networking/utls@master
+          go get golang.org/x/net@latest
+          
           go mod tidy
           # 只编译 arm64 和 arm，跳过 x86 和 x86_64
           gomobile bind -v \
