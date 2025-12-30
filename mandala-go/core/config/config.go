@@ -38,6 +38,13 @@ type TLSConfig struct {
 	Enabled    bool   `json:"enabled"`
 	ServerName string `json:"server_name,omitempty"` // SNI
 	Insecure   bool   `json:"insecure,omitempty"`    // 是否跳过证书验证
+
+	// [新增] ECH 配置
+	// 注意：JSON tag 使用下划线风格以保持一致性
+	EnableECH     bool   `json:"enable_ech"`      // ECH 开关
+	ECHPublicName string `json:"ech_public_name"` // ECH 公示名称 (Public SNI)
+	ECHDoHURL     string `json:"ech_doh_url"`     // 用于查询 ECH 密钥的 DoH 地址
+	ECHConfig     []byte `json:"-"`               // 运行时存储解析到的密钥 (不参与 JSON 传输)
 }
 
 // TransportConfig 定义传输层配置 (如 WebSocket)
