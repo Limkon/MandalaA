@@ -38,10 +38,6 @@ type Stack struct {
 	ctx       context.Context
 	cancel    context.CancelFunc
 	closeOnce sync.Once
-
-	// [优化] DNS 连接复用
-	dnsMu   sync.Mutex
-	dnsConn net.Conn
 }
 
 func StartStack(fd int, mtu int, cfg *config.OutboundConfig) (*Stack, error) {
@@ -125,9 +121,8 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 		r.Complete(true)
 		return
 	}
-	// [修复] 不再依赖简单的 defer remoteConn.Close()，而是通过 closeAll 统一管理
 
-	// 2. 握手逻辑 (保持不变)
+	// 2. 握手逻辑
 	var payload []byte
 	var hErr error
 	targetHost := id.LocalAddress.String()
@@ -179,8 +174,7 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 
 	localConn := gonet.NewTCPConn(&wq, ep)
 
-	// [修复] 健壮的双向转发关闭逻辑
-	// 任何一端出错或结束，都确保两端 socket 被关闭
+	// [优化] 双向关闭逻辑
 	closeAll := func() {
 		localConn.Close()
 		remoteConn.Close()
@@ -189,13 +183,11 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 	go func() {
 		defer closeAll()
 		io.Copy(localConn, remoteConn)
-		// 远程读完(EOF)，通常意味着连接结束
 	}()
 
 	go func() {
 		defer closeAll()
 		io.Copy(remoteConn, localConn)
-		// 本地读完(EOF)
 	}()
 }
 
@@ -203,7 +195,7 @@ func (s *Stack) handleUDP(r *udp.ForwarderRequest) {
 	id := r.ID()
 	targetPort := int(id.LocalPort)
 
-	// [DNS处理] 拦截 53 端口
+	// [DNS] 拦截 53 端口
 	if targetPort == 53 {
 		var wq waiter.Queue
 		ep, err := r.CreateEndpoint(&wq)
@@ -232,6 +224,7 @@ func (s *Stack) handleUDP(r *udp.ForwarderRequest) {
 		return
 	}
 
+	// NAT 转发维持
 	go func() {
 		defer localConn.Close()
 		buf := make([]byte, 4096)
@@ -248,11 +241,11 @@ func (s *Stack) handleUDP(r *udp.ForwarderRequest) {
 	}()
 }
 
-// [优化] handleRemoteDNS 复用连接
+// [稳定版] handleRemoteDNS
+// 移除了连接复用和锁，每次请求独立连接，彻底解决卡顿和死锁问题。
 func (s *Stack) handleRemoteDNS(localConn *gonet.UDPConn) {
 	defer localConn.Close()
 	
-	// 读取 Android 发来的 DNS 请求
 	localConn.SetDeadline(time.Now().Add(5 * time.Second))
 	buf := make([]byte, 1500)
 	n, err := localConn.Read(buf)
@@ -260,97 +253,73 @@ func (s *Stack) handleRemoteDNS(localConn *gonet.UDPConn) {
 		return
 	}
 
-	// 锁定 DNS 通道，确保同一时刻只有一个 DNS 请求在写入/读取，防止 TCP 流粘包
-	s.dnsMu.Lock()
-	defer s.dnsMu.Unlock()
-
-	// 重试机制：如果 cached 连接已死，允许重连一次
-	for i := 0; i < 2; i++ {
-		// 1. 获取或建立连接
-		if s.dnsConn == nil {
-			// Dial
-			proxyConn, err := s.dialer.Dial()
-			if err != nil {
-				log.Printf("[DNS] 代理连接失败: %v", err)
-				return // 无法连接，直接丢弃
-			}
-			
-			// Handshake (Target: 8.8.8.8:53)
-			var payload []byte
-			isVless := false
-			
-			switch strings.ToLower(s.config.Type) {
-			case "mandala":
-				client := protocol.NewMandalaClient(s.config.Username, s.config.Password)
-				payload, _ = client.BuildHandshakePayload("8.8.8.8", 53, s.config.Settings.Noise)
-			case "trojan":
-				payload, _ = protocol.BuildTrojanPayload(s.config.Password, "8.8.8.8", 53)
-			case "vless":
-				payload, _ = protocol.BuildVlessPayload(s.config.UUID, "8.8.8.8", 53)
-				isVless = true
-			case "shadowsocks":
-				payload, _ = protocol.BuildShadowsocksPayload("8.8.8.8", 53)
-			case "socks", "socks5":
-				if err := protocol.HandshakeSocks5(proxyConn, s.config.Username, s.config.Password, "8.8.8.8", 53); err != nil {
-					proxyConn.Close()
-					log.Printf("[DNS] Socks5握手失败: %v", err)
-					return
-				}
-			}
-
-			if len(payload) > 0 {
-				if _, err := proxyConn.Write(payload); err != nil {
-					proxyConn.Close()
-					continue // 重试
-				}
-			}
-
-			if isVless {
-				proxyConn = protocol.NewVlessConn(proxyConn)
-			}
-			
-			s.dnsConn = proxyConn
-		}
-
-		// 2. 封装 DNS 请求 (Length-Prefixed)
-		reqData := make([]byte, 2+n)
-		reqData[0] = byte(n >> 8)
-		reqData[1] = byte(n)
-		copy(reqData[2:], buf[:n])
-
-		s.dnsConn.SetDeadline(time.Now().Add(5 * time.Second))
-		if _, err := s.dnsConn.Write(reqData); err != nil {
-			log.Printf("[DNS] 写入失败，重置连接: %v", err)
-			s.dnsConn.Close()
-			s.dnsConn = nil
-			continue // 连接可能断开，重试 loop (i=1)
-		}
-
-		// 3. 读取响应长度
-		lenBuf := make([]byte, 2)
-		if _, err := io.ReadFull(s.dnsConn, lenBuf); err != nil {
-			log.Printf("[DNS] 读取长度失败: %v", err)
-			s.dnsConn.Close()
-			s.dnsConn = nil
-			continue
-		}
-		respLen := int(lenBuf[0])<<8 | int(lenBuf[1])
-
-		// 4. 读取响应体
-		respBuf := make([]byte, respLen)
-		if _, err := io.ReadFull(s.dnsConn, respBuf); err != nil {
-			log.Printf("[DNS] 读取Body失败: %v", err)
-			s.dnsConn.Close()
-			s.dnsConn = nil
-			continue
-		}
-
-		// 5. 写回 Android (UDP)
-		localConn.Write(respBuf)
-		
-		// 成功，保持 dnsConn 不关闭，供下次使用
+	// 1. 每次建立新连接
+	proxyConn, err := s.dialer.Dial()
+	if err != nil {
+		log.Printf("[DNS] 代理连接失败: %v", err)
 		return
 	}
+	defer proxyConn.Close()
+
+	// 2. 握手
+	var payload []byte
+	isVless := false
+	
+	switch strings.ToLower(s.config.Type) {
+	case "mandala":
+		client := protocol.NewMandalaClient(s.config.Username, s.config.Password)
+		payload, _ = client.BuildHandshakePayload("8.8.8.8", 53, s.config.Settings.Noise)
+	case "trojan":
+		payload, _ = protocol.BuildTrojanPayload(s.config.Password, "8.8.8.8", 53)
+	case "vless":
+		payload, _ = protocol.BuildVlessPayload(s.config.UUID, "8.8.8.8", 53)
+		isVless = true
+	case "shadowsocks":
+		payload, _ = protocol.BuildShadowsocksPayload("8.8.8.8", 53)
+	case "socks", "socks5":
+		if err := protocol.HandshakeSocks5(proxyConn, s.config.Username, s.config.Password, "8.8.8.8", 53); err != nil {
+			log.Printf("[DNS] Socks5握手失败: %v", err)
+			return
+		}
+	}
+
+	if len(payload) > 0 {
+		if _, err := proxyConn.Write(payload); err != nil {
+			return
+		}
+	}
+
+	if isVless {
+		proxyConn = protocol.NewVlessConn(proxyConn)
+	}
+
+	// 3. 转发 DNS 请求
+	// 封装长度 (RFC 1035 TCP DNS 格式)
+	reqData := make([]byte, 2+n)
+	reqData[0] = byte(n >> 8)
+	reqData[1] = byte(n)
+	copy(reqData[2:], buf[:n])
+
+	proxyConn.SetDeadline(time.Now().Add(5 * time.Second))
+	if _, err := proxyConn.Write(reqData); err != nil {
+		return
+	}
+
+	// 4. 读取响应长度
+	lenBuf := make([]byte, 2)
+	if _, err := io.ReadFull(proxyConn, lenBuf); err != nil {
+		return
+	}
+	respLen := int(lenBuf[0])<<8 | int(lenBuf[1])
+
+	// 5. 读取响应体
+	respBuf := make([]byte, respLen)
+	if _, err := io.ReadFull(proxyConn, respBuf); err != nil {
+		return
+	}
+
+	// 6. 写回 Android
+	localConn.Write(respBuf)
 }
 
 func (s *Stack) Close() {
@@ -360,14 +329,6 @@ func (s *Stack) Close() {
 		if s.cancel != nil {
 			s.cancel()
 		}
-		
-		// [优化] 关闭 DNS 缓存连接
-		s.dnsMu.Lock()
-		if s.dnsConn != nil {
-			s.dnsConn.Close()
-			s.dnsConn = nil
-		}
-		s.dnsMu.Unlock()
 
 		time.Sleep(100 * time.Millisecond)
 
