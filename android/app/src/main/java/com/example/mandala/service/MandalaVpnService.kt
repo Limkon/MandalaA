@@ -11,8 +11,9 @@ import android.os.Build
 import android.os.ParcelFileDescriptor
 import androidx.core.app.NotificationCompat
 import com.example.mandala.MainActivity
-import com.example.mandala.R // [新增] 导入 R 类以引用资源
+import com.example.mandala.R
 import mobile.Mobile
+import java.io.IOException
 
 class MandalaVpnService : VpnService() {
     companion object {
@@ -27,6 +28,8 @@ class MandalaVpnService : VpnService() {
     }
 
     private var vpnInterface: ParcelFileDescriptor? = null
+    // [修复] 增加运行状态标记，防止重复启动或停止
+    private var isRunning = false
 
     override fun onCreate() {
         super.onCreate()
@@ -39,6 +42,7 @@ class MandalaVpnService : VpnService() {
             return START_NOT_STICKY
         }
 
+        // 提升前台服务优先级
         startForeground(NOTIFICATION_ID, createNotification("正在连接..."))
 
         val config = intent?.getStringExtra(EXTRA_CONFIG) ?: ""
@@ -70,19 +74,27 @@ class MandalaVpnService : VpnService() {
             PendingIntent.getActivity(this, 0, it, PendingIntent.FLAG_IMMUTABLE)
         }
 
-        // [修改] 将 setSmallIcon 修改为使用应用的 ic_launcher
-        // 注意：如果要完美适配状态栏，建议制作一个纯白色的 ic_stat_name 图标
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Mandala VPN")
             .setContentText(content)
-            .setSmallIcon(R.mipmap.ic_launcher) // 这里修改为你的应用图标
+            .setSmallIcon(R.mipmap.ic_launcher)
             .setContentIntent(pendingIntent)
             .setOngoing(true)
+            .setOnlyAlertOnce(true) // [优化] 防止状态更新时通知震动打扰
             .build()
     }
 
     private fun startVpn(configJson: String) {
+        if (isRunning) return
+        isRunning = true
+
         try {
+            // [优化] 如果之前有未关闭的接口，先关闭，防止 FD 泄露
+            if (vpnInterface != null) {
+                try { vpnInterface?.close() } catch (e: Exception) {}
+                vpnInterface = null
+            }
+
             val builder = Builder()
                 .addAddress(VPN_ADDRESS, 24)
                 .addRoute("0.0.0.0", 0)
@@ -91,16 +103,30 @@ class MandalaVpnService : VpnService() {
                 .addDnsServer("8.8.8.8")
                 .addDisallowedApplication(packageName)
                 .setSession("Mandala Core")
+            
+            // Android 10+ 建议显式设置按流量计费状态
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                builder.setMetered(false)
+            }
 
             vpnInterface = builder.establish()
-            vpnInterface?.let {
-                val manager = getSystemService(NotificationManager::class.java)
-                manager.notify(NOTIFICATION_ID, createNotification("VPN 已连接"))
+            
+            // 检查建立是否成功（如被其他 VPN 抢占）
+            val fd = vpnInterface?.fd
+            if (fd == null) {
+                stopVpn()
+                return
+            }
 
-                val err = Mobile.startVpn(it.fd.toLong(), 1500L, configJson)
-                if (err.isNotEmpty()) {
-                    stopVpn()
-                }
+            val manager = getSystemService(NotificationManager::class.java)
+            manager.notify(NOTIFICATION_ID, createNotification("VPN 已连接"))
+
+            // 启动 Go 核心
+            // 注意：fd 必须转换为 Long 传递
+            val err = Mobile.startVpn(fd.toLong(), 1500L, configJson)
+            if (err.isNotEmpty()) {
+                android.util.Log.e("MandalaVpn", "Core start failed: $err")
+                stopVpn()
             }
         } catch (e: Exception) {
             e.printStackTrace()
@@ -109,22 +135,28 @@ class MandalaVpnService : VpnService() {
     }
 
     private fun stopVpn() {
+        isRunning = false
+        
         try {
+            // [修复] 确保 Mobile.stop() 被调用
             Mobile.stop()
         } catch (e: Exception) {
             e.printStackTrace()
         }
         
         try {
+            // [修复] 必须关闭文件描述符，否则下次启动可能会失败或内存泄露
             vpnInterface?.close()
-        } catch (e: Exception) {
+        } catch (e: IOException) {
             e.printStackTrace()
+        } finally {
+            vpnInterface = null
         }
         
-        vpnInterface = null
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
 
+        // 发送广播通知 UI 更新
         sendBroadcast(Intent(ACTION_VPN_STOPPED).setPackage(packageName))
     }
 
