@@ -24,7 +24,7 @@ func init() {
 	rand.Seed(time.Now().UnixNano())
 }
 
-// 简单的内存缓存，避免频繁请求 DoH 导致连接慢
+// ECH 缓存 (以域名为 Key)
 var (
 	echCache      = make(map[string][]byte)
 	echCacheMutex sync.RWMutex
@@ -53,31 +53,31 @@ func (d *Dialer) Dial() (net.Conn, error) {
 	if d.Config.TLS != nil && d.Config.TLS.Enabled {
 		var echConfigList []byte
 		
-		// [ECH 逻辑核心]
+		// [ECH 逻辑]
 		if d.Config.TLS.EnableECH {
-			// 确定查询使用的域名 (优先使用 PublicName)
+			// 确定查询域名: 优先 ECHPublicName, 其次 ServerName
 			queryDomain := d.Config.TLS.ECHPublicName
 			if queryDomain == "" {
 				queryDomain = d.Config.TLS.ServerName
 			}
 			
-			// 优先查缓存
+			// 1. 查内存缓存
 			echCacheMutex.RLock()
 			cached, ok := echCache[queryDomain]
 			echCacheMutex.RUnlock()
 
 			if ok {
 				echConfigList = cached
-				fmt.Printf("[ECH] 使用缓存配置: %s\n", queryDomain)
+				fmt.Printf("[ECH] 使用缓存密钥: %s (长度: %d)\n", queryDomain, len(cached))
 			} else {
-				// 缓存没有，去请求 DoH
+				// 2. 缓存未命中，执行 DoH 查询
 				dohURL := d.Config.TLS.ECHDoHURL
 				if dohURL == "" {
-					dohURL = "https://1.1.1.1/dns-query" // 默认 Cloudflare
+					dohURL = "https://1.1.1.1/dns-query" // 默认 DoH
 				}
 
-				fmt.Printf("[ECH] 正在从 %s 获取 %s 的密钥...\n", dohURL, queryDomain)
-				ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+				fmt.Printf("[ECH] 开始获取密钥 | DoH: %s | SNI: %s\n", dohURL, queryDomain)
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second) 
 				configs, err := resolveECHConfig(ctx, dohURL, queryDomain)
 				cancel()
 
@@ -87,23 +87,27 @@ func (d *Dialer) Dial() (net.Conn, error) {
 					echCacheMutex.Lock()
 					echCache[queryDomain] = configs
 					echCacheMutex.Unlock()
-					fmt.Printf("[ECH] 密钥获取成功!\n")
+					fmt.Printf("[ECH] 密钥获取成功! 已存入缓存。\n")
 				} else {
-					// [重要] 获取失败时的策略
 					fmt.Printf("[ECH] 错误: 密钥获取失败: %v\n", err)
-					// 如果你希望强制 ECH，获取失败就应该返回错误，而不是降级
-					// return nil, fmt.Errorf("ECH setup failed: %v", err) 
-					fmt.Println("[ECH] 警告: 降级到普通 TLS (可能会被阻断)")
+					// 注意：此处失败后继续运行，会降级为普通 TLS，可能导致连接被阻断
 				}
 			}
+		}
+
+		// [关键修复] 动态设置 TLS 版本
+		// ECH 规范要求必须使用 TLS 1.3
+		minVer := uint16(tls.VersionTLS12)
+		if len(echConfigList) > 0 {
+			minVer = tls.VersionTLS13
+			fmt.Println("[ECH] 已强制设置 MinVersion = TLS 1.3")
 		}
 
 		uTlsConfig := &utls.Config{
 			ServerName:         d.Config.TLS.ServerName,
 			InsecureSkipVerify: d.Config.TLS.Insecure,
-			MinVersion:         tls.VersionTLS12,
+			MinVersion:         minVer, // 使用动态版本
 			NextProtos:         []string{"http/1.1"},
-			// [关键] 只要设置了这个字段，utls 会自动处理扩展注入
 			EncryptedClientHelloConfigList: echConfigList,
 		}
 
@@ -116,10 +120,9 @@ func (d *Dialer) Dial() (net.Conn, error) {
 			conn = &FragmentConn{Conn: conn, active: true}
 		}
 
-		// 使用 HelloChrome_Auto，它通常包含 ECH 支持
+		// 使用 HelloChrome_Auto 指纹
 		uConn := utls.UClient(conn, uTlsConfig, utls.HelloChrome_Auto)
 
-		// 显式调用 BuildHandshakeState 可以帮助调试，但通常 ApplyPreset 足够
 		if err := uConn.Handshake(); err != nil {
 			conn.Close()
 			return nil, fmt.Errorf("utls handshake failed: %v", err)
@@ -131,7 +134,6 @@ func (d *Dialer) Dial() (net.Conn, error) {
 
 	// 3. 处理 WebSocket
 	if d.Config.Transport != nil && d.Config.Transport.Type == "ws" {
-		// 如果 TLS 已建立，scheme 必须是 ws (通过加密隧道传输明文 HTTP Upgrade)
 		scheme := "ws"
 		if d.Config.TLS != nil && d.Config.TLS.Enabled && !isTLSEstablished {
 			scheme = "wss"
@@ -148,7 +150,7 @@ func (d *Dialer) Dial() (net.Conn, error) {
 		}
 		
 		wsURL := fmt.Sprintf("%s://%s%s", scheme, host, path)
-
+		
 		headers := make(http.Header)
 		if d.Config.Transport.Headers != nil {
 			for k, v := range d.Config.Transport.Headers {
@@ -186,71 +188,81 @@ func (d *Dialer) Dial() (net.Conn, error) {
 	return conn, nil
 }
 
-// resolveECHConfig 使用 GET 方式 (Base64Url) 查询 DoH，穿透性更好
+// resolveECHConfig 获取 ECH 配置 (含详细调试日志)
 func resolveECHConfig(ctx context.Context, dohURL string, domain string) ([]byte, error) {
+	// 1. 构造 DNS 问题
 	msg := new(dns.Msg)
 	msg.SetQuestion(dns.Fqdn(domain), dns.TypeHTTPS)
-
 	data, err := msg.Pack()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("DNS Pack 失败: %v", err)
 	}
 
+	// 2. Base64Url 编码
 	b64Query := base64.RawURLEncoding.EncodeToString(data)
-	reqURL := fmt.Sprintf("%s?dns=%s", dohURL, b64Query)
-	// 简单处理 URL 参数拼接
+	
+	// 3. 拼接 URL
+	var reqURL string
 	if strings.Contains(dohURL, "?") {
 		reqURL = fmt.Sprintf("%s&dns=%s", dohURL, b64Query)
+	} else {
+		reqURL = fmt.Sprintf("%s?dns=%s", dohURL, b64Query)
 	}
 
+	fmt.Printf("[ECH-Debug] 请求 URL: %s\n", reqURL)
+
+	// 4. 发起 HTTP 请求
 	req, err := http.NewRequestWithContext(ctx, "GET", reqURL, nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Accept", "application/dns-message")
-	
-	// 使用自定义 Client，避免复用导致的问题
+
 	client := &http.Client{
 		Transport: &http.Transport{
 			DisableKeepAlives: true,
-			TLSClientConfig: &tls.Config{
-				InsecureSkipVerify: true, // DoH 请求本身建议暂时忽略证书，防止鸡生蛋问题
-			},
-			ResponseHeaderTimeout: 3 * time.Second,
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, // 忽略证书验证以提高成功率
+			ResponseHeaderTimeout: 5 * time.Second,
 		},
 	}
 	
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("HTTP 请求错误: %v", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("DoH status: %d", resp.StatusCode)
+		return nil, fmt.Errorf("HTTP 状态码错误: %d", resp.StatusCode)
 	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("读取响应体失败: %v", err)
 	}
+	
+	fmt.Printf("[ECH-Debug] 收到响应，大小: %d 字节\n", len(body))
 
+	// 5. 解析 DNS 响应
 	respMsg := new(dns.Msg)
 	if err := respMsg.Unpack(body); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("DNS Unpack 失败: %v", err)
 	}
 
+	// 6. 提取 HTTPS 记录
 	for _, ans := range respMsg.Answer {
 		if https, ok := ans.(*dns.HTTPS); ok {
+			// fmt.Printf("[ECH-Debug] 找到 HTTPS 记录，Priority: %d\n", https.Priority)
 			for _, val := range https.Value {
 				if ech, ok := val.(*dns.SVCBECHConfig); ok {
+					fmt.Printf("[ECH-Debug] >>> 成功提取 ECH Config! (长度: %d) <<<\n", len(ech.ECH))
 					return ech.ECH, nil
 				}
 			}
 		}
 	}
 
-	return nil, fmt.Errorf("no ECH config found")
+	return nil, fmt.Errorf("响应中未包含有效的 ECH 配置")
 }
 
 // FragmentConn 保持不变
