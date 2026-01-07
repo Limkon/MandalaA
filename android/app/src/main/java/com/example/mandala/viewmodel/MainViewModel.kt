@@ -36,7 +36,7 @@ data class AppStrings(
     val protocolSettings: String,
     val tlsFragment: String, val tlsFragmentDesc: String,
     val randomPadding: String, val randomPaddingDesc: String,
-    // [新增] ECH 相关文本
+    // ECH 相关文本
     val echSettings: String, val enableEch: String, val enableEchDesc: String,
     val echPublicName: String, val echDoH: String,
     
@@ -51,7 +51,7 @@ data class AppStrings(
     val password: String, val uuid: String, val sni: String,
     val subscription: String, val addSubscription: String, val editSubscription: String, val subUrl: String,
     val updateInterval: String, val daily: String, val weekly: String, val custom: String, 
-    val intervalNever: String, // [新增] 从不更新选项
+    val intervalNever: String,
     val updateNow: String, val lastUpdate: String, val neverUpdate: String
 )
 
@@ -67,7 +67,6 @@ val ChineseStrings = AppStrings(
     protocolSettings = "协议参数 (核心)",
     tlsFragment = "TLS 分片", tlsFragmentDesc = "拆分 TLS 记录以绕过 DPI 检测",
     randomPadding = "随机填充", randomPaddingDesc = "向数据包添加随机噪音",
-    // [新增] ECH 中文
     echSettings = "ECH (加密 Client Hello)", enableEch = "启用 ECH", enableEchDesc = "加密握手信息，防止 SNI 嗅探",
     echPublicName = "公共名称 (Public Name)", echDoH = "DoH 服务器 (用于获取密钥)",
     
@@ -82,7 +81,7 @@ val ChineseStrings = AppStrings(
     password = "密码", uuid = "UUID", sni = "SNI (域名)",
     subscription = "订阅管理", addSubscription = "添加订阅", editSubscription = "编辑订阅", subUrl = "订阅地址 (URL)",
     updateInterval = "更新频率", daily = "每天", weekly = "每周", custom = "自定义天数", 
-    intervalNever = "从不 (手动)", // [新增]
+    intervalNever = "从不 (手动)",
     updateNow = "立即更新", lastUpdate = "最后更新", neverUpdate = "从未更新"
 )
 
@@ -98,7 +97,6 @@ val EnglishStrings = AppStrings(
     protocolSettings = "Protocol",
     tlsFragment = "TLS Fragment", tlsFragmentDesc = "Split TLS records to bypass DPI",
     randomPadding = "Random Padding", randomPaddingDesc = "Add random noise to packets",
-    // [新增] ECH 英文
     echSettings = "ECH Settings", enableEch = "Enable ECH", enableEchDesc = "Encrypt handshake to hide SNI",
     echPublicName = "Public Name", echDoH = "DoH Server URL",
     
@@ -113,10 +111,11 @@ val EnglishStrings = AppStrings(
     password = "Password", uuid = "UUID", sni = "SNI",
     subscription = "Subscriptions", addSubscription = "Add Sub", editSubscription = "Edit Sub", subUrl = "Subscription URL",
     updateInterval = "Update Interval", daily = "Daily", weekly = "Weekly", custom = "Custom Days",
-    intervalNever = "Never (Manual)", // [新增]
+    intervalNever = "Never (Manual)",
     updateNow = "Update Now", lastUpdate = "Last update", neverUpdate = "Never"
 )
 
+// [修改] Node 数据类，增加 ECH 字段
 data class Node(
     val tag: String,
     val protocol: String,
@@ -128,10 +127,14 @@ data class Node(
     val path: String = "/",
     val sni: String = "",
     val isSelected: Boolean = false,
-    val subscriptionUrl: String? = null 
+    val subscriptionUrl: String? = null,
+    
+    // [新增] ECH 配置字段
+    val enableEch: Boolean = false,
+    val echPublicName: String? = null,
+    val echDoH: String? = null
 )
 
-// [修改] 添加 NEVER
 enum class UpdateInterval { DAILY, WEEKLY, CUSTOM, NEVER }
 
 data class Subscription(
@@ -183,7 +186,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _randomPadding = MutableStateFlow(prefs.getBoolean("random_padding", false))
     val randomPadding = _randomPadding.asStateFlow()
 
-    // [新增] ECH 状态
+    // ECH 状态 (全局默认设置)
     private val _enableEch = MutableStateFlow(prefs.getBoolean("enable_ech", false))
     val enableEch = _enableEch.asStateFlow()
 
@@ -236,11 +239,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             "tls_fragment" -> _tlsFragment.value = value
             "random_padding" -> _randomPadding.value = value
             "logging_enabled" -> _loggingEnabled.value = value
-            "enable_ech" -> _enableEch.value = value // [新增]
+            "enable_ech" -> _enableEch.value = value
         }
     }
 
-    // [新增] 更新字符串类型的设置
     fun updateStringSetting(key: String, value: String) {
         prefs.edit().putString(key, value).apply()
         when (key) {
@@ -306,7 +308,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val current = _subscriptions.value.toMutableList()
             val index = current.indexOfFirst { it.url == oldSub.url }
             if (index != -1) {
-                // 如果 URL 变更，处理关联节点和旧任务
                 if (oldSub.url != newSub.url) {
                     WorkManager.getInstance(getApplication()).cancelUniqueWork(oldSub.url)
                     val currentNodes = _nodes.value.toMutableList()
@@ -389,7 +390,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun scheduleSubscriptionUpdate(sub: Subscription) {
-        // [新增] 如果选择了从不更新，则取消现有的定时任务
         if (sub.interval == UpdateInterval.NEVER) {
             WorkManager.getInstance(getApplication()).cancelUniqueWork(sub.url)
             addLog("[订阅] 已取消自动更新: ${sub.tag}")
@@ -541,6 +541,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _logs.value = current
     }
 
+    // [修改] 生成 Config JSON，融入 ECH 逻辑
     private fun generateConfigJson(node: Node): String {
         val useTls = node.sni.isNotEmpty() || node.transport == "ws" || node.port == 443
         val logPath = if (_loggingEnabled.value) {
@@ -549,7 +550,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             else getApplication<Application>().filesDir.absolutePath + "/mandala_core.log"
         } else ""
         
-        // [修改] 注入 ECH 字段到 JSON
+        // ECH 策略：节点配置优先，若节点未配置(null/empty)且全局开启，则尝试使用全局配置
+        // 如果节点强制开启 (node.enableEch == true)，则使用节点自己的参数或全局兜底参数
+        
+        val effectiveEch = node.enableEch || _enableEch.value
+        val effectivePublicName = if (!node.echPublicName.isNullOrEmpty()) node.echPublicName else _echPublicName.value
+        val effectiveDoH = if (!node.echDoH.isNullOrEmpty()) node.echDoH else _echDoH.value
+        
         return """
         {
             "tag": "${node.tag}",
@@ -564,9 +571,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 "enabled": $useTls, 
                 "server_name": "${if (node.sni.isEmpty()) node.server else node.sni}", 
                 "insecure": ${_allowInsecure.value},
-                "enable_ech": ${_enableEch.value},
-                "ech_public_name": "${_echPublicName.value}",
-                "ech_doh_url": "${_echDoH.value}"
+                "enable_ech": $effectiveEch,
+                "ech_public_name": "$effectivePublicName",
+                "ech_doh_url": "$effectiveDoH"
             },
             "transport": { "type": "${node.transport}", "path": "${node.path}" },
             "settings": { "vpn_mode": ${_vpnMode.value}, "fragment": ${_tlsFragment.value}, "noise": ${_randomPadding.value} },
