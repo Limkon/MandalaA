@@ -50,7 +50,8 @@ data class AppStrings(
     val tag: String, val address: String, val port: String,
     val password: String, val uuid: String, val sni: String,
     val subscription: String, val addSubscription: String, val editSubscription: String, val subUrl: String,
-    val updateInterval: String, val daily: String, val weekly: String, val custom: String,
+    val updateInterval: String, val daily: String, val weekly: String, val custom: String, 
+    val intervalNever: String, // [新增] 从不更新选项
     val updateNow: String, val lastUpdate: String, val neverUpdate: String
 )
 
@@ -80,7 +81,8 @@ val ChineseStrings = AppStrings(
     tag = "备注", address = "地址", port = "端口",
     password = "密码", uuid = "UUID", sni = "SNI (域名)",
     subscription = "订阅管理", addSubscription = "添加订阅", editSubscription = "编辑订阅", subUrl = "订阅地址 (URL)",
-    updateInterval = "更新频率", daily = "每天", weekly = "每周", custom = "自定义天数",
+    updateInterval = "更新频率", daily = "每天", weekly = "每周", custom = "自定义天数", 
+    intervalNever = "从不 (手动)", // [新增]
     updateNow = "立即更新", lastUpdate = "最后更新", neverUpdate = "从未更新"
 )
 
@@ -111,6 +113,7 @@ val EnglishStrings = AppStrings(
     password = "Password", uuid = "UUID", sni = "SNI",
     subscription = "Subscriptions", addSubscription = "Add Sub", editSubscription = "Edit Sub", subUrl = "Subscription URL",
     updateInterval = "Update Interval", daily = "Daily", weekly = "Weekly", custom = "Custom Days",
+    intervalNever = "Never (Manual)", // [新增]
     updateNow = "Update Now", lastUpdate = "Last update", neverUpdate = "Never"
 )
 
@@ -128,7 +131,8 @@ data class Node(
     val subscriptionUrl: String? = null 
 )
 
-enum class UpdateInterval { DAILY, WEEKLY, CUSTOM }
+// [修改] 添加 NEVER
+enum class UpdateInterval { DAILY, WEEKLY, CUSTOM, NEVER }
 
 data class Subscription(
     val url: String,
@@ -385,10 +389,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun scheduleSubscriptionUpdate(sub: Subscription) {
+        // [新增] 如果选择了从不更新，则取消现有的定时任务
+        if (sub.interval == UpdateInterval.NEVER) {
+            WorkManager.getInstance(getApplication()).cancelUniqueWork(sub.url)
+            addLog("[订阅] 已取消自动更新: ${sub.tag}")
+            return
+        }
+
         val intervalMinutes = when(sub.interval) {
             UpdateInterval.DAILY -> 24L * 60
             UpdateInterval.WEEKLY -> 7L * 24 * 60
             UpdateInterval.CUSTOM -> sub.customDays.toLong() * 24 * 60
+            else -> 24L * 60 // Fallback
         }
 
         val workRequest = PeriodicWorkRequestBuilder<SubscriptionWorker>(
