@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"mandala/core/config"
@@ -22,6 +23,12 @@ import (
 func init() {
 	rand.Seed(time.Now().UnixNano())
 }
+
+// 简单的内存缓存，避免频繁请求 DoH 导致连接慢
+var (
+	echCache      = make(map[string][]byte)
+	echCacheMutex sync.RWMutex
+)
 
 type Dialer struct {
 	Config *config.OutboundConfig
@@ -44,19 +51,50 @@ func (d *Dialer) Dial() (net.Conn, error) {
 	isTLSEstablished := false
 	
 	if d.Config.TLS != nil && d.Config.TLS.Enabled {
-		// [ECH] 获取配置
 		var echConfigList []byte
-		if d.Config.TLS.EnableECH && d.Config.TLS.ECHDoHURL != "" && d.Config.TLS.ECHPublicName != "" {
-			// 使用较短超时，避免阻塞
-			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-			configs, err := resolveECHConfig(ctx, d.Config.TLS.ECHDoHURL, d.Config.TLS.ECHPublicName)
-			cancel()
+		
+		// [ECH 逻辑核心]
+		if d.Config.TLS.EnableECH {
+			// 确定查询使用的域名 (优先使用 PublicName)
+			queryDomain := d.Config.TLS.ECHPublicName
+			if queryDomain == "" {
+				queryDomain = d.Config.TLS.ServerName
+			}
+			
+			// 优先查缓存
+			echCacheMutex.RLock()
+			cached, ok := echCache[queryDomain]
+			echCacheMutex.RUnlock()
 
-			if err == nil && len(configs) > 0 {
-				echConfigList = configs
-				// fmt.Printf("[ECH] Config fetched for %s\n", d.Config.TLS.ECHPublicName)
+			if ok {
+				echConfigList = cached
+				fmt.Printf("[ECH] 使用缓存配置: %s\n", queryDomain)
 			} else {
-				fmt.Printf("[ECH] Warning: Fetch failed: %v. Fallback to standard TLS.\n", err)
+				// 缓存没有，去请求 DoH
+				dohURL := d.Config.TLS.ECHDoHURL
+				if dohURL == "" {
+					dohURL = "https://1.1.1.1/dns-query" // 默认 Cloudflare
+				}
+
+				fmt.Printf("[ECH] 正在从 %s 获取 %s 的密钥...\n", dohURL, queryDomain)
+				ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+				configs, err := resolveECHConfig(ctx, dohURL, queryDomain)
+				cancel()
+
+				if err == nil && len(configs) > 0 {
+					echConfigList = configs
+					// 写入缓存
+					echCacheMutex.Lock()
+					echCache[queryDomain] = configs
+					echCacheMutex.Unlock()
+					fmt.Printf("[ECH] 密钥获取成功!\n")
+				} else {
+					// [重要] 获取失败时的策略
+					fmt.Printf("[ECH] 错误: 密钥获取失败: %v\n", err)
+					// 如果你希望强制 ECH，获取失败就应该返回错误，而不是降级
+					// return nil, fmt.Errorf("ECH setup failed: %v", err) 
+					fmt.Println("[ECH] 警告: 降级到普通 TLS (可能会被阻断)")
+				}
 			}
 		}
 
@@ -65,7 +103,8 @@ func (d *Dialer) Dial() (net.Conn, error) {
 			InsecureSkipVerify: d.Config.TLS.Insecure,
 			MinVersion:         tls.VersionTLS12,
 			NextProtos:         []string{"http/1.1"},
-			EncryptedClientHelloConfigList: echConfigList, // 设置 ECH 配置
+			// [关键] 只要设置了这个字段，utls 会自动处理扩展注入
+			EncryptedClientHelloConfigList: echConfigList,
 		}
 
 		if uTlsConfig.ServerName == "" {
@@ -77,39 +116,10 @@ func (d *Dialer) Dial() (net.Conn, error) {
 			conn = &FragmentConn{Conn: conn, active: true}
 		}
 
-		uConn := utls.UClient(conn, uTlsConfig, utls.HelloCustom)
+		// 使用 HelloChrome_Auto，它通常包含 ECH 支持
+		uConn := utls.UClient(conn, uTlsConfig, utls.HelloChrome_Auto)
 
-		// 1. 获取 Chrome 指纹 (HelloChrome_Auto 会自动匹配最新版 Chrome 指纹)
-		spec, err := utls.UTLSIdToSpec(utls.HelloChrome_Auto)
-		if err != nil {
-			conn.Close()
-			return nil, fmt.Errorf("failed to get uTLS spec: %v", err)
-		}
-
-		// 2. 强制 ALPN 为 http/1.1
-		foundALPN := false
-		for i, ext := range spec.Extensions {
-			if alpn, ok := ext.(*utls.ALPNExtension); ok {
-				alpn.AlpnProtocols = []string{"http/1.1"}
-				spec.Extensions[i] = alpn
-				foundALPN = true
-				break
-			}
-		}
-		if !foundALPN {
-			spec.Extensions = append(spec.Extensions, &utls.ALPNExtension{AlpnProtocols: []string{"http/1.1"}})
-		}
-
-		// [修正] 移除导致编译错误的手动注入代码
-		// utls 库在使用 Config.EncryptedClientHelloConfigList 时，
-		// 会根据 ClientHelloSpec 自动处理 ECH 扩展。
-		// 新版 utls 中 EncryptedClientHelloExtension 是接口，无法直接实例化。
-
-		if err := uConn.ApplyPreset(&spec); err != nil {
-			conn.Close()
-			return nil, fmt.Errorf("apply preset failed: %v", err)
-		}
-
+		// 显式调用 BuildHandshakeState 可以帮助调试，但通常 ApplyPreset 足够
 		if err := uConn.Handshake(); err != nil {
 			conn.Close()
 			return nil, fmt.Errorf("utls handshake failed: %v", err)
@@ -121,6 +131,7 @@ func (d *Dialer) Dial() (net.Conn, error) {
 
 	// 3. 处理 WebSocket
 	if d.Config.Transport != nil && d.Config.Transport.Type == "ws" {
+		// 如果 TLS 已建立，scheme 必须是 ws (通过加密隧道传输明文 HTTP Upgrade)
 		scheme := "ws"
 		if d.Config.TLS != nil && d.Config.TLS.Enabled && !isTLSEstablished {
 			scheme = "wss"
@@ -175,8 +186,7 @@ func (d *Dialer) Dial() (net.Conn, error) {
 	return conn, nil
 }
 
-// resolveECHConfig 通过 DoH 查询 HTTPS 记录并提取 ECH 配置
-// [优化] 使用 GET 请求 (Base64Url 编码 DNS 报文)，兼容性更好
+// resolveECHConfig 使用 GET 方式 (Base64Url) 查询 DoH，穿透性更好
 func resolveECHConfig(ctx context.Context, dohURL string, domain string) ([]byte, error) {
 	msg := new(dns.Msg)
 	msg.SetQuestion(dns.Fqdn(domain), dns.TypeHTTPS)
@@ -186,34 +196,30 @@ func resolveECHConfig(ctx context.Context, dohURL string, domain string) ([]byte
 		return nil, err
 	}
 
-	// 使用 Base64Url 编码，构造 ?dns=... 参数
 	b64Query := base64.RawURLEncoding.EncodeToString(data)
 	reqURL := fmt.Sprintf("%s?dns=%s", dohURL, b64Query)
-	
-	// 处理 dohURL 原本可能包含参数的情况
+	// 简单处理 URL 参数拼接
 	if strings.Contains(dohURL, "?") {
-		// 简单的追加逻辑，实际场景可能需要更严谨的 URL 解析
-		if strings.HasSuffix(dohURL, "?") {
-			reqURL = fmt.Sprintf("%sdns=%s", dohURL, b64Query)
-		} else {
-			reqURL = fmt.Sprintf("%s&dns=%s", dohURL, b64Query)
-		}
+		reqURL = fmt.Sprintf("%s&dns=%s", dohURL, b64Query)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "GET", reqURL, nil)
 	if err != nil {
 		return nil, err
 	}
-	// 设置 DoH 标准头
 	req.Header.Set("Accept", "application/dns-message")
-	req.Header.Set("Content-Type", "application/dns-message")
-
+	
+	// 使用自定义 Client，避免复用导致的问题
 	client := &http.Client{
 		Transport: &http.Transport{
 			DisableKeepAlives: true,
+			TLSClientConfig: &tls.Config{
+				InsecureSkipVerify: true, // DoH 请求本身建议暂时忽略证书，防止鸡生蛋问题
+			},
 			ResponseHeaderTimeout: 3 * time.Second,
 		},
 	}
+	
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
