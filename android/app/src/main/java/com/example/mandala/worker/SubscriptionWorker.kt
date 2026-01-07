@@ -7,6 +7,7 @@ import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
 import com.example.mandala.data.NodeRepository
 import com.example.mandala.utils.NodeParser
+import com.example.mandala.viewmodel.UpdateInterval // [新增] 导入枚举以进行判断
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.util.concurrent.TimeUnit
@@ -16,7 +17,15 @@ class SubscriptionWorker(appContext: Context, workerParams: WorkerParameters) :
 
     override suspend fun doWork(): Result {
         val repository = NodeRepository(applicationContext)
-        val subscriptions = repository.loadSubscriptions().filter { it.isEnabled }
+        
+        // [修改] 过滤订阅列表：
+        // 1. 必须是启用状态 (isEnabled)
+        // 2. 更新周期不能是 "从不" (NEVER)
+        // 这样可以防止 Worker 被其他订阅唤醒时，误更新了设置为手动的订阅
+        val subscriptions = repository.loadSubscriptions().filter { 
+            it.isEnabled && it.interval != UpdateInterval.NEVER 
+        }
+        
         val client = OkHttpClient.Builder()
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(15, TimeUnit.SECONDS)
