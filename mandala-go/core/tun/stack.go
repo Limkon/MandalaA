@@ -101,7 +101,7 @@ func (s *Stack) startPacketHandling() {
 	s.stack.SetTransportProtocolHandler(tcp.ProtocolNumber, tcpHandler.HandlePacket)
 
 	udpHandler := udp.NewForwarder(s.stack, func(r *udp.ForwarderRequest) {
-		s.handleUDP(r)
+		go s.handleUDP(r)
 	})
 	s.stack.SetTransportProtocolHandler(udp.ProtocolNumber, udpHandler.HandlePacket)
 }
@@ -109,7 +109,7 @@ func (s *Stack) startPacketHandling() {
 func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 	defer func() {
 		if err := recover(); err != nil {
-			log.Printf("[TCP] Panic: %v", err)
+			log.Printf("[TCP] Panic 恢复: %v", err)
 		}
 	}()
 
@@ -174,7 +174,7 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 
 	localConn := gonet.NewTCPConn(&wq, ep)
 
-	// [优化] 双向关闭逻辑
+	// 双向关闭逻辑
 	closeAll := func() {
 		localConn.Close()
 		remoteConn.Close()
@@ -192,6 +192,12 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 }
 
 func (s *Stack) handleUDP(r *udp.ForwarderRequest) {
+	defer func() {
+		if err := recover(); err != nil {
+			log.Printf("[UDP] Panic 恢复: %v", err)
+		}
+	}()
+
 	id := r.ID()
 	targetPort := int(id.LocalPort)
 
@@ -234,17 +240,24 @@ func (s *Stack) handleUDP(r *udp.ForwarderRequest) {
 			if rErr != nil {
 				return
 			}
-			if _, wErr := session.RemoteConn.Write(buf[:n]); wErr != nil {
-				return
+			if session.RemoteConn != nil {
+				if _, wErr := session.RemoteConn.Write(buf[:n]); wErr != nil {
+					return
+				}
 			}
 		}
 	}()
 }
 
-// [稳定版] handleRemoteDNS
-// 移除了连接复用和锁，每次请求独立连接，彻底解决卡顿和死锁问题。
 func (s *Stack) handleRemoteDNS(localConn *gonet.UDPConn) {
-	defer localConn.Close()
+	defer func() {
+		if err := recover(); err != nil {
+			log.Printf("[DNS] Panic 恢复: %v", err)
+		}
+		if localConn != nil {
+			localConn.Close()
+		}
+	}()
 	
 	localConn.SetDeadline(time.Now().Add(5 * time.Second))
 	buf := make([]byte, 1500)
@@ -253,10 +266,13 @@ func (s *Stack) handleRemoteDNS(localConn *gonet.UDPConn) {
 		return
 	}
 
-	// 1. 每次建立新连接
+	// 1. 建立新连接
 	proxyConn, err := s.dialer.Dial()
 	if err != nil {
-		log.Printf("[DNS] 代理连接失败: %v", err)
+		log.Printf("[DNS] 代理拨号失败: %v", err)
+		return
+	}
+	if proxyConn == nil {
 		return
 	}
 	defer proxyConn.Close()
@@ -278,7 +294,7 @@ func (s *Stack) handleRemoteDNS(localConn *gonet.UDPConn) {
 		payload, _ = protocol.BuildShadowsocksPayload("8.8.8.8", 53)
 	case "socks", "socks5":
 		if err := protocol.HandshakeSocks5(proxyConn, s.config.Username, s.config.Password, "8.8.8.8", 53); err != nil {
-			log.Printf("[DNS] Socks5握手失败: %v", err)
+			log.Printf("[DNS] Socks5 握手失败: %v", err)
 			return
 		}
 	}
@@ -289,42 +305,45 @@ func (s *Stack) handleRemoteDNS(localConn *gonet.UDPConn) {
 		}
 	}
 
+	var finalConn net.Conn = proxyConn
 	if isVless {
-		proxyConn = protocol.NewVlessConn(proxyConn)
+		finalConn = protocol.NewVlessConn(proxyConn)
 	}
 
-	// 3. 转发 DNS 请求
-	// 封装长度 (RFC 1035 TCP DNS 格式)
+	// 3. 转发 DNS 请求 (RFC 1035 TCP DNS 格式)
 	reqData := make([]byte, 2+n)
 	reqData[0] = byte(n >> 8)
 	reqData[1] = byte(n)
 	copy(reqData[2:], buf[:n])
 
-	proxyConn.SetDeadline(time.Now().Add(5 * time.Second))
-	if _, err := proxyConn.Write(reqData); err != nil {
+	finalConn.SetDeadline(time.Now().Add(5 * time.Second))
+	if _, err := finalConn.Write(reqData); err != nil {
 		return
 	}
 
 	// 4. 读取响应长度
 	lenBuf := make([]byte, 2)
-	if _, err := io.ReadFull(proxyConn, lenBuf); err != nil {
+	if _, err := io.ReadFull(finalConn, lenBuf); err != nil {
 		return
 	}
 	respLen := int(lenBuf[0])<<8 | int(lenBuf[1])
-
-	// 5. 读取响应体
-	respBuf := make([]byte, respLen)
-	if _, err := io.ReadFull(proxyConn, respBuf); err != nil {
+	if respLen <= 0 || respLen > 1500 {
 		return
 	}
 
-	// 6. 写回 Android
+	// 5. 读取响应体
+	respBuf := make([]byte, respLen)
+	if _, err := io.ReadFull(finalConn, respBuf); err != nil {
+		return
+	}
+
+	// 6. 写回本地
 	localConn.Write(respBuf)
 }
 
 func (s *Stack) Close() {
 	s.closeOnce.Do(func() {
-		log.Println("[Stack] Stopping...")
+		log.Println("[Stack] 正在停止网络栈...")
 
 		if s.cancel != nil {
 			s.cancel()
@@ -340,6 +359,6 @@ func (s *Stack) Close() {
 			s.stack.Close()
 		}
 
-		log.Println("[Stack] Stopped.")
+		log.Println("[Stack] 网络栈已停止。")
 	})
 }
