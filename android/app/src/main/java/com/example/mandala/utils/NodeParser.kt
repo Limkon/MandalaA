@@ -56,12 +56,28 @@ object NodeParser {
         }
     }
 
+    // [新增] 辅助方法：从 Uri 提取 ECH 相关参数
+    private fun extractEchParams(uri: Uri): Triple<Boolean, String?, String?> {
+        val enable = uri.getQueryParameter("ech") == "1" || uri.getQueryParameter("enable_ech") == "true"
+        // 支持多种参数命名风格 (ech_public_name, ech_sni, public_name)
+        val publicName = uri.getQueryParameter("ech_public_name") 
+            ?: uri.getQueryParameter("ech_sni")
+            ?: uri.getQueryParameter("public_name")
+        
+        val doh = uri.getQueryParameter("ech_doh") 
+            ?: uri.getQueryParameter("ech_doh_url")
+        
+        return Triple(enable, publicName, doh)
+    }
+
     private fun parseMandala(link: String): Node? {
         val uri = Uri.parse(link)
         val host = uri.host ?: return null
-        // 兼容 type 和 transport 参数
         val transportParam = uri.getQueryParameter("type") ?: uri.getQueryParameter("transport")
         
+        // [新增] ECH 解析
+        val (enableEch, echPublicName, echDoH) = extractEchParams(uri)
+
         return Node(
             tag = uri.fragment?.let { Uri.decode(it) } ?: "未命名Mandala",
             protocol = "mandala",
@@ -70,7 +86,11 @@ object NodeParser {
             password = uri.userInfo?.let { Uri.decode(it) } ?: "",
             transport = if (transportParam == "ws") "ws" else "tcp",
             path = uri.getQueryParameter("path")?.let { Uri.decode(it) } ?: "/",
-            sni = uri.getQueryParameter("sni") ?: ""
+            sni = uri.getQueryParameter("sni") ?: "",
+            // [新增]
+            enableEch = enableEch,
+            echPublicName = echPublicName,
+            echDoH = echDoH
         )
     }
 
@@ -100,21 +120,33 @@ object NodeParser {
             else -> portElement.asString.toIntOrNull() ?: 443
         }
 
+        // [新增] 尝试从 JSON 中读取 ECH 字段 (非标准，但兼容自定义配置)
+        val enableEch = json.get("ech")?.asString == "1" || json.get("enable_ech")?.asBoolean == true
+        val echPublicName = json.get("ech_public_name")?.asString ?: json.get("ech_sni")?.asString
+        val echDoH = json.get("ech_doh")?.asString ?: json.get("ech_doh_url")?.asString
+
         return Node(
             tag = json.get("ps")?.asString?.let { Uri.decode(it) } ?: "未命名VMess",
-            protocol = "vless", 
+            protocol = "vless", // 保持源代码逻辑，使用 vless 协议栈处理 vmess
             server = json.get("add")?.asString ?: return null,
             port = port,
             uuid = json.get("id")?.asString ?: "",
             transport = if (json.get("net")?.asString == "ws") "ws" else "tcp",
             path = json.get("path")?.asString ?: "/",
-            sni = json.get("sni")?.asString ?: ""
+            sni = json.get("sni")?.asString ?: "",
+            // [新增]
+            enableEch = enableEch,
+            echPublicName = echPublicName,
+            echDoH = echDoH
         )
     }
 
     private fun parseTrojan(link: String): Node? {
         val uri = Uri.parse(link)
         val transportParam = uri.getQueryParameter("type") ?: uri.getQueryParameter("transport")
+        
+        // [新增] ECH 解析
+        val (enableEch, echPublicName, echDoH) = extractEchParams(uri)
 
         return Node(
             tag = uri.fragment?.let { Uri.decode(it) } ?: "未命名Trojan",
@@ -124,13 +156,20 @@ object NodeParser {
             password = uri.userInfo?.let { Uri.decode(it) } ?: "",
             transport = if (transportParam == "ws") "ws" else "tcp",
             path = uri.getQueryParameter("path") ?: "/",
-            sni = uri.getQueryParameter("sni") ?: ""
+            sni = uri.getQueryParameter("sni") ?: "",
+            // [新增]
+            enableEch = enableEch,
+            echPublicName = echPublicName,
+            echDoH = echDoH
         )
     }
 
     private fun parseVless(link: String): Node? {
         val uri = Uri.parse(link)
         val transportParam = uri.getQueryParameter("type") ?: uri.getQueryParameter("transport")
+
+        // [新增] ECH 解析
+        val (enableEch, echPublicName, echDoH) = extractEchParams(uri)
 
         return Node(
             tag = uri.fragment?.let { Uri.decode(it) } ?: "未命名VLESS",
@@ -140,7 +179,11 @@ object NodeParser {
             uuid = uri.userInfo?.let { Uri.decode(it) } ?: "",
             transport = if (transportParam == "ws") "ws" else "tcp",
             path = uri.getQueryParameter("path") ?: "/",
-            sni = uri.getQueryParameter("sni") ?: ""
+            sni = uri.getQueryParameter("sni") ?: "",
+            // [新增]
+            enableEch = enableEch,
+            echPublicName = echPublicName,
+            echDoH = echDoH
         )
     }
 
@@ -230,6 +273,9 @@ object NodeParser {
             }
         }
 
+        // [新增] ECH 解析 (虽然 SS 协议本身不常支持 ECH，但保留参数解析能力)
+        val (enableEch, echPublicName, echDoH) = extractEchParams(uri)
+
         return Node(
             tag = tag,
             protocol = "shadowsocks",
@@ -239,7 +285,11 @@ object NodeParser {
             uuid = Uri.decode(method),
             transport = transport,
             path = finalPath,
-            sni = finalSni
+            sni = finalSni,
+            // [新增]
+            enableEch = enableEch,
+            echPublicName = echPublicName,
+            echDoH = echDoH
         )
     }
 
@@ -274,7 +324,6 @@ object NodeParser {
             }
         }
 
-        // [关键修复] 兼容 type 和 transport 参数名
         val transportParam = uri.getQueryParameter("type") ?: uri.getQueryParameter("transport")
         val path = uri.getQueryParameter("path")
         val sni = uri.getQueryParameter("sni")
@@ -282,6 +331,9 @@ object NodeParser {
         val transport = if (transportParam == "ws") "ws" else "tcp"
         val finalPath = path ?: "/"
         val finalSni = sni ?: ""
+
+        // [新增] ECH 解析
+        val (enableEch, echPublicName, echDoH) = extractEchParams(uri)
 
         return Node(
             tag = uri.fragment?.let { Uri.decode(it) } ?: "未命名Socks5",
@@ -292,7 +344,11 @@ object NodeParser {
             uuid = Uri.decode(username),
             transport = transport,
             path = finalPath,
-            sni = finalSni
+            sni = finalSni,
+            // [新增]
+            enableEch = enableEch,
+            echPublicName = echPublicName,
+            echDoH = echDoH
         )
     }
 }
