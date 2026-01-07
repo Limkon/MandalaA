@@ -271,6 +271,7 @@ fun SubscriptionEditDialog(
                             UpdateInterval.DAILY -> strings.daily
                             UpdateInterval.WEEKLY -> strings.weekly
                             UpdateInterval.CUSTOM -> strings.custom
+                            UpdateInterval.NEVER -> strings.intervalNever // [新增]
                         },
                         onValueChange = {}, readOnly = true, label = { Text(strings.updateInterval) },
                         trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expandedInterval) },
@@ -280,6 +281,8 @@ fun SubscriptionEditDialog(
                         DropdownMenuItem(text = { Text(strings.daily) }, onClick = { interval = UpdateInterval.DAILY; expandedInterval = false })
                         DropdownMenuItem(text = { Text(strings.weekly) }, onClick = { interval = UpdateInterval.WEEKLY; expandedInterval = false })
                         DropdownMenuItem(text = { Text(strings.custom) }, onClick = { interval = UpdateInterval.CUSTOM; expandedInterval = false })
+                        // [新增]
+                        DropdownMenuItem(text = { Text(strings.intervalNever) }, onClick = { interval = UpdateInterval.NEVER; expandedInterval = false })
                     }
                 }
 
