@@ -48,20 +48,26 @@ func (c *MandalaClient) BuildHandshakePayload(targetHost string, targetPort int,
 		return nil, errors.New("hash generation failed")
 	}
 	buf.WriteString(hashHex)
+	// log.Printf("[Mandala] 密码哈希已生成 (56字节)")
 
 	// 2.2 随机填充 (Padding)
 	var padLen int
+	b := make([]byte, 1)
+
+	// [Fix] 健壮的随机数读取
+	if _, err := io.ReadFull(rand.Reader, b); err != nil {
+		return nil, err
+	}
+
 	if useNoise {
-		b := make([]byte, 1)
-		rand.Read(b)
+		// 启用噪音模式：填充 32 ~ 159 字节
 		padLen = 32 + int(b[0]%128)
 	} else {
-		b := make([]byte, 1)
-		rand.Read(b)
+		// 标准模式：填充 0 ~ 15 字节
 		padLen = int(b[0] % 16)
 	}
 
-	buf.WriteByte(byte(padLen))
+	buf.WriteByte(byte(padLen)) // 写入填充长度字节
 
 	if padLen > 0 {
 		padding := make([]byte, padLen)
@@ -70,20 +76,22 @@ func (c *MandalaClient) BuildHandshakePayload(targetHost string, targetPort int,
 		}
 		buf.Write(padding)
 	}
-	// log.Printf("[Mandala] Padding: %d", padLen)
+	// log.Printf("[Mandala] 添加随机填充长度: %d (Noise: %v)", padLen, useNoise)
 
 	// 2.3 指令 CMD (0x01 Connect)
 	buf.WriteByte(0x01)
 
-	// 2.4 目标地址
+	// 2.4 目标地址 (SOCKS5 格式)
 	ip := net.ParseIP(targetHost)
 	if ip != nil {
 		if ip4 := ip.To4(); ip4 != nil {
 			buf.WriteByte(0x01)
 			buf.Write(ip4)
+			log.Printf("[Mandala] 目标类型: IPv4")
 		} else {
 			buf.WriteByte(0x04)
 			buf.Write(ip.To16())
+			log.Printf("[Mandala] 目标类型: IPv6")
 		}
 	} else {
 		if len(targetHost) > 255 {
@@ -92,14 +100,15 @@ func (c *MandalaClient) BuildHandshakePayload(targetHost string, targetPort int,
 		buf.WriteByte(0x03)
 		buf.WriteByte(byte(len(targetHost)))
 		buf.WriteString(targetHost)
+		log.Printf("[Mandala] 目标类型: 域名 (%s)", targetHost)
 	}
 
-	// 2.5 端口
+	// 2.5 端口 (2 bytes Big Endian)
 	portBuf := make([]byte, 2)
 	binary.BigEndian.PutUint16(portBuf, uint16(targetPort))
 	buf.Write(portBuf)
 
-	// 2.6 CRLF
+	// 2.6 CRLF (0x0D 0x0A)
 	buf.Write([]byte{0x0D, 0x0A})
 
 	// 3. 构造最终包 (Salt + Xorshift128+ Encrypted Payload)
@@ -107,17 +116,17 @@ func (c *MandalaClient) BuildHandshakePayload(targetHost string, targetPort int,
 	finalSize := 4 + len(plaintext)
 	finalBuf := make([]byte, finalSize)
 
-	// 写入头部 Salt
+	// 3.1 写入头部 Salt
 	copy(finalBuf[0:4], salt)
-	
-	// 写入明文到缓冲区
+
+	// 3.2 写入明文到缓冲区 (从第4字节开始)
 	copy(finalBuf[4:], plaintext)
-	
-	// 初始化流加密 (Key=Password, Salt=Salt)
-	// [Critical] 使用与服务端一致的加密算法
+
+	// 3.3 初始化流加密 (Key=Password, Salt=Salt)
+	// [Critical] 使用与服务端一致的加密算法 (定义在 crypto.go 中)
 	cipher := NewStreamCipher([]byte(c.Password), salt)
-	
-	// 对 Buffer 的数据部分（跳过 Salt）进行原地加密
+
+	// 3.4 对 Buffer 的数据部分（跳过 Salt）进行原地加密
 	cipher.Process(finalBuf[4:])
 
 	log.Printf("[Mandala] 握手包构造完成 (Xorshift128+)，总长度: %d", finalSize)
