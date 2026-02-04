@@ -27,7 +27,7 @@ func NewMandalaClient(username, password string) *MandalaClient {
 }
 
 // BuildHandshakePayload 构造 Mandala 协议的握手包
-// [修改] 增加 useNoise 参数，用于控制是否启用长随机填充
+// [Refactor] 使用 Xorshift128+ 替代简单的 Salt XOR
 func (c *MandalaClient) BuildHandshakePayload(targetHost string, targetPort int, useNoise bool) ([]byte, error) {
 	log.Printf("[Mandala] 开始构造握手包 -> %s:%d", targetHost, targetPort)
 
@@ -36,7 +36,7 @@ func (c *MandalaClient) BuildHandshakePayload(targetHost string, targetPort int,
 	if _, err := io.ReadFull(rand.Reader, salt); err != nil {
 		return nil, err
 	}
-	log.Printf("[Mandala] 生成随机 Salt: %x", salt)
+	// log.Printf("[Mandala] 生成随机 Salt: %x", salt)
 
 	// 2. 准备明文 Payload
 	var buf bytes.Buffer
@@ -48,24 +48,20 @@ func (c *MandalaClient) BuildHandshakePayload(targetHost string, targetPort int,
 		return nil, errors.New("hash generation failed")
 	}
 	buf.WriteString(hashHex)
-	log.Printf("[Mandala] 密码哈希已生成 (56字节)")
 
 	// 2.2 随机填充 (Padding)
-	// [修改] 根据 useNoise 决定填充长度
 	var padLen int
 	if useNoise {
-		// 启用噪音模式：填充 32 ~ 159 字节
 		b := make([]byte, 1)
 		rand.Read(b)
 		padLen = 32 + int(b[0]%128)
 	} else {
-		// 标准模式：填充 0 ~ 15 字节
 		b := make([]byte, 1)
 		rand.Read(b)
 		padLen = int(b[0] % 16)
 	}
 
-	buf.WriteByte(byte(padLen)) // 写入填充长度字节
+	buf.WriteByte(byte(padLen))
 
 	if padLen > 0 {
 		padding := make([]byte, padLen)
@@ -74,22 +70,20 @@ func (c *MandalaClient) BuildHandshakePayload(targetHost string, targetPort int,
 		}
 		buf.Write(padding)
 	}
-	log.Printf("[Mandala] 添加随机填充长度: %d (Noise: %v)", padLen, useNoise)
+	// log.Printf("[Mandala] Padding: %d", padLen)
 
 	// 2.3 指令 CMD (0x01 Connect)
 	buf.WriteByte(0x01)
 
-	// 2.4 目标地址 (SOCKS5 格式)
+	// 2.4 目标地址
 	ip := net.ParseIP(targetHost)
 	if ip != nil {
 		if ip4 := ip.To4(); ip4 != nil {
 			buf.WriteByte(0x01)
 			buf.Write(ip4)
-			log.Printf("[Mandala] 目标类型: IPv4")
 		} else {
 			buf.WriteByte(0x04)
 			buf.Write(ip.To16())
-			log.Printf("[Mandala] 目标类型: IPv6")
 		}
 	} else {
 		if len(targetHost) > 255 {
@@ -98,29 +92,34 @@ func (c *MandalaClient) BuildHandshakePayload(targetHost string, targetPort int,
 		buf.WriteByte(0x03)
 		buf.WriteByte(byte(len(targetHost)))
 		buf.WriteString(targetHost)
-		log.Printf("[Mandala] 目标类型: 域名 (%s)", targetHost)
 	}
 
-	// 2.5 端口 (2 bytes Big Endian)
+	// 2.5 端口
 	portBuf := make([]byte, 2)
 	binary.BigEndian.PutUint16(portBuf, uint16(targetPort))
 	buf.Write(portBuf)
 
-	// 2.6 CRLF (0x0D 0x0A)
+	// 2.6 CRLF
 	buf.Write([]byte{0x0D, 0x0A})
 
-	// 3. 构造最终包 (Salt + XOR Encrypted Payload)
+	// 3. 构造最终包 (Salt + Xorshift128+ Encrypted Payload)
 	plaintext := buf.Bytes()
 	finalSize := 4 + len(plaintext)
 	finalBuf := make([]byte, finalSize)
 
+	// 写入头部 Salt
 	copy(finalBuf[0:4], salt)
+	
+	// 写入明文到缓冲区
+	copy(finalBuf[4:], plaintext)
+	
+	// 初始化流加密 (Key=Password, Salt=Salt)
+	// [Critical] 使用与服务端一致的加密算法
+	cipher := NewStreamCipher([]byte(c.Password), salt)
+	
+	// 对 Buffer 的数据部分（跳过 Salt）进行原地加密
+	cipher.Process(finalBuf[4:])
 
-	// 执行 XOR 加密
-	for i := 0; i < len(plaintext); i++ {
-		finalBuf[4+i] = plaintext[i] ^ salt[i%4]
-	}
-
-	log.Printf("[Mandala] 握手包构造完成，总长度: %d", finalSize)
+	log.Printf("[Mandala] 握手包构造完成 (Xorshift128+)，总长度: %d", finalSize)
 	return finalBuf, nil
 }
