@@ -49,13 +49,14 @@ func (c *MandalaClient) deriveKey() {
 		return
 	}
 	// PBKDF2-HMAC-SHA256
+	// 依赖: golang.org/x/crypto/pbkdf2
 	c.key = pbkdf2.Key([]byte(c.Password), []byte(MandalaSalt), MandalaIter, MandalaKeyLen, sha256.New)
 }
 
 // BuildHandshakePayload 构造 Mandala 协议的握手包
 // 根据 MandalaECH (C语言版) 重构：使用 PBKDF2 + AES-256-GCM
-// 注意：useNoise 参数在 AES-GCM 模式下不再使用（GCM 自带安全性，且 C 端 plaintext 定义未包含 padding）
-func (c *MandalaClient) BuildHandshakePayload(targetHost string, targetPort int, useNoise bool) ([]byte, error) {
+// [Change] 移除了废弃的 useNoise 参数，因为 GCM 模式不再使用随机长度填充
+func (c *MandalaClient) BuildHandshakePayload(targetHost string, targetPort int) ([]byte, error) {
 	log.Printf("[Mandala] 开始构造握手包 -> %s:%d", targetHost, targetPort)
 
 	// 确保密钥已派生
@@ -68,7 +69,6 @@ func (c *MandalaClient) BuildHandshakePayload(targetHost string, targetPort int,
 
 	// 1. 准备明文 Payload
 	// 对应 C 端 crypto.h 注释: plaintext: 明文数据 (Command + Address + Port)
-	// 相比旧协议，去除了 Hash ID 和 Padding，因为 GCM Tag 提供了认证功能
 	var buf bytes.Buffer
 
 	// 1.1 指令 CMD (0x01 Connect)
@@ -80,11 +80,9 @@ func (c *MandalaClient) BuildHandshakePayload(targetHost string, targetPort int,
 		if ip4 := ip.To4(); ip4 != nil {
 			buf.WriteByte(0x01)
 			buf.Write(ip4)
-			// log.Printf("[Mandala] 目标类型: IPv4")
 		} else {
 			buf.WriteByte(0x04)
 			buf.Write(ip.To16())
-			// log.Printf("[Mandala] 目标类型: IPv6")
 		}
 	} else {
 		if len(targetHost) > 255 {
@@ -93,7 +91,6 @@ func (c *MandalaClient) BuildHandshakePayload(targetHost string, targetPort int,
 		buf.WriteByte(0x03)
 		buf.WriteByte(byte(len(targetHost)))
 		buf.WriteString(targetHost)
-		// log.Printf("[Mandala] 目标类型: 域名 (%s)", targetHost)
 	}
 
 	// 1.3 端口 (2 bytes Big Endian)
@@ -101,7 +98,7 @@ func (c *MandalaClient) BuildHandshakePayload(targetHost string, targetPort int,
 	binary.BigEndian.PutUint16(portBuf, uint16(targetPort))
 	buf.Write(portBuf)
 
-	// 1.4 CRLF (0x0D 0x0A) - 保留原有协议结尾
+	// 1.4 CRLF (0x0D 0x0A)
 	buf.Write([]byte{0x0D, 0x0A})
 
 	plaintext := buf.Bytes()
@@ -134,8 +131,7 @@ func (c *MandalaClient) mandalaPack(plaintext []byte) ([]byte, error) {
 
 	// 4. 加密 (Seal)
 	// Seal(dst, nonce, plaintext, additionalData)
-	// 我们将 dst 设置为 iv，这样结果就是 iv + ciphertext + tag
-	// Go 的 GCM Seal 会自动在密文后追加 Tag
+	// 结果格式: iv + ciphertext + tag
 	ciphertext := aesgcm.Seal(iv, iv, plaintext, nil)
 
 	log.Printf("[Mandala] 握手包构造完成 (AES-256-GCM), 总长度: %d", len(ciphertext))
