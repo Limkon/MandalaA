@@ -96,16 +96,8 @@ func (h *Handler) HandleConnection(localConn net.Conn) {
 
 	switch proxyType {
 	case "mandala":
-		// [Fix] 兼容性修复：Mandala 的密钥通常是 UUID
-		// 如果 Password 字段为空，尝试使用 UUID 字段
-		password := h.Config.Password
-		if password == "" {
-			password = h.Config.UUID
-		}
-
-		client := protocol.NewMandalaClient(h.Config.Username, password)
-		
-		// 传入 Noise 配置
+		client := protocol.NewMandalaClient(h.Config.Username, h.Config.Password)
+		// [修改] 传入 Noise 配置
 		payload, err := client.BuildHandshakePayload(targetHost, targetPort, h.Config.Settings.Noise)
 		if err != nil {
 			log.Printf("[Mandala] Build payload failed: %v", err)
@@ -139,7 +131,7 @@ func (h *Handler) HandleConnection(localConn net.Conn) {
 		}
 		isVless = true
 
-	// Shadowsocks 支持
+	// [新增] Shadowsocks 支持
 	case "shadowsocks":
 		payload, err := protocol.BuildShadowsocksPayload(targetHost, targetPort)
 		if err != nil {
@@ -151,7 +143,7 @@ func (h *Handler) HandleConnection(localConn net.Conn) {
 			return
 		}
 
-	// SOCKS5 支持 (含认证)
+	// [新增] SOCKS5 支持 (含认证)
 	case "socks", "socks5":
 		err := protocol.HandshakeSocks5(remoteConn, h.Config.Username, h.Config.Password, targetHost, targetPort)
 		if err != nil {
