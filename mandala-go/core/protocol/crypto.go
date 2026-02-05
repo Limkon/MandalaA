@@ -19,7 +19,6 @@ const (
 	MandalaIterations = 1000
 	MandalaKeyLen     = 32 // AES-256
 	MandalaIVLen      = 12 // GCM Standard IV
-	MandalaTagLen     = 16 // GCM Tag Length
 )
 
 var (
@@ -53,19 +52,17 @@ func ParseUUID(uuidStr string) ([]byte, error) {
 }
 
 // ==========================================
-// [Verified] Key Derivation: PBKDF2 (Matches Server & C Client)
+// [Final Fix] PBKDF2 + Safe Memory Allocation
 // ==========================================
 
 // MandalaDeriveKey derives the AES-GCM key from the password using PBKDF2
 func MandalaDeriveKey(password string) []byte {
-	// 1. Check cache (Optimization)
+	// 1. Check cache
 	if key, ok := mandalaKeyCache.Load(password); ok {
 		return key.([]byte)
 	}
 
-	// 2. Compute key (Expensive operation)
-	// [Critical] 必须与服务端 src/protocols/mandala.js 保持一致
-	// Salt: "mandala-protocol-salt-v1", Iterations: 1000, Hash: SHA-256
+	// 2. Compute key (PBKDF2 SHA256 1000 Iterations) - Must match Server
 	key := pbkdf2.Key([]byte(password), []byte(MandalaSalt), MandalaIterations, MandalaKeyLen, sha256.New)
 
 	// 3. Store in cache
@@ -88,21 +85,22 @@ func MandalaPack(password string, plaintext []byte) ([]byte, error) {
 		return nil, err
 	}
 
-	// [Safety Fix] 显式分配完整缓冲区，避免切片自动扩容带来的潜在内存重叠问题
-	// 总长度 = IV长度(12) + 明文长度 + Tag长度(16)
-	totalLen := MandalaIVLen + len(plaintext) + aesgcm.Overhead()
-	ciphertext := make([]byte, totalLen)
-
-	// 1. 生成随机 IV，存放在缓冲区头部 (0-12字节)
-	iv := ciphertext[:MandalaIVLen]
+	// [Safety] 1. Generate IV independently
+	iv := make([]byte, MandalaIVLen)
 	if _, err := io.ReadFull(rand.Reader, iv); err != nil {
 		return nil, err
 	}
 
-	// 2. 执行加密
-	// Seal 将加密结果（Ciphertext+Tag）追加到 dst (ciphertext[:MandalaIVLen]) 后面
-	// 最终 ciphertext 变量将包含：[IV ... Ciphertext ... Tag]
-	aesgcm.Seal(ciphertext[:MandalaIVLen], iv, plaintext, nil)
+	// [Safety] 2. Encrypt to a separate buffer first (auto-appends Tag)
+	// Seal(dst, nonce, plaintext, data) -> appends result to dst
+	// passing nil as dst creates a new slice
+	encryptedData := aesgcm.Seal(nil, iv, plaintext, nil)
 
-	return ciphertext, nil
+	// [Safety] 3. Combine [IV] + [Cipher+Tag]
+	// Explicit concatenation avoids any slice capacity confusion
+	finalMsg := make([]byte, 0, len(iv)+len(encryptedData))
+	finalMsg = append(finalMsg, iv...)
+	finalMsg = append(finalMsg, encryptedData...)
+
+	return finalMsg, nil
 }
