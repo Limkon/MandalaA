@@ -86,15 +86,23 @@ func MandalaPack(password string, plaintext []byte) ([]byte, error) {
 		return nil, err
 	}
 
-	// Generate random IV
-	iv := make([]byte, MandalaIVLen)
+	// [Fix] 显式分配完整缓冲区，避免切片自动扩容带来的潜在内存重叠问题
+	// 总长度 = IV长度(12) + 明文长度 + Tag长度(16)
+	totalLen := MandalaIVLen + len(plaintext) + aesgcm.Overhead()
+	ciphertext := make([]byte, totalLen)
+
+	// 1. 生成随机 IV，存放在缓冲区头部 (0-12字节)
+	iv := ciphertext[:MandalaIVLen]
 	if _, err := io.ReadFull(rand.Reader, iv); err != nil {
 		return nil, err
 	}
 
-	// Encrypt: Seal appends the result to the first argument (dst)
-	// We pass iv as the prefix, so the output is IV + Ciphertext + Tag
-	ciphertext := aesgcm.Seal(iv, iv, plaintext, nil)
+	// 2. 执行加密
+	// Seal(dst, nonce, plaintext, data)
+	// 我们将 ciphertext[:MandalaIVLen] 作为 dst 传入。
+	// Seal 会将加密结果（Ciphertext+Tag）追加到 dst 后面。
+	// 最终 ciphertext 变量将包含：[IV ... Ciphertext ... Tag]
+	aesgcm.Seal(ciphertext[:MandalaIVLen], iv, plaintext, nil)
 
 	return ciphertext, nil
 }
