@@ -140,7 +140,7 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 
 		client := protocol.NewMandalaClient(s.config.Username, password)
 		payload, hErr = client.BuildHandshakePayload(targetHost, targetPort, s.config.Settings.Noise)
-
+	
 	case "trojan":
 		payload, hErr = protocol.BuildTrojanPayload(s.config.Password, targetHost, targetPort)
 	case "vless":
@@ -296,9 +296,9 @@ func (s *Stack) handleRemoteDNS(localConn *gonet.UDPConn) {
 		if password == "" {
 			password = s.config.UUID
 		}
-
 		client := protocol.NewMandalaClient(s.config.Username, password)
 		payload, _ = client.BuildHandshakePayload("8.8.8.8", 53, s.config.Settings.Noise)
+
 	case "trojan":
 		payload, _ = protocol.BuildTrojanPayload(s.config.Password, "8.8.8.8", 53)
 	case "vless":
