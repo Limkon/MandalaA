@@ -19,11 +19,11 @@ const (
 	MandalaIterations = 1000
 	MandalaKeyLen     = 32 // AES-256
 	MandalaIVLen      = 12 // GCM Standard IV
+	MandalaTagLen     = 16 // GCM Tag Length
 )
 
 var (
 	// Global cache for PBKDF2 derived keys to avoid re-computation
-	// map[string][]byte
 	mandalaKeyCache sync.Map
 )
 
