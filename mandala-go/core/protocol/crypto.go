@@ -53,7 +53,7 @@ func ParseUUID(uuidStr string) ([]byte, error) {
 }
 
 // ==========================================
-// [New Feature] AES-256-GCM Crypto Utils
+// [Verified] Key Derivation: PBKDF2 (Matches Server & C Client)
 // ==========================================
 
 // MandalaDeriveKey derives the AES-GCM key from the password using PBKDF2
@@ -64,6 +64,8 @@ func MandalaDeriveKey(password string) []byte {
 	}
 
 	// 2. Compute key (Expensive operation)
+	// [Critical] 必须与服务端 src/protocols/mandala.js 保持一致
+	// Salt: "mandala-protocol-salt-v1", Iterations: 1000, Hash: SHA-256
 	key := pbkdf2.Key([]byte(password), []byte(MandalaSalt), MandalaIterations, MandalaKeyLen, sha256.New)
 
 	// 3. Store in cache
@@ -86,7 +88,7 @@ func MandalaPack(password string, plaintext []byte) ([]byte, error) {
 		return nil, err
 	}
 
-	// [Fix] 显式分配完整缓冲区，避免切片自动扩容带来的潜在内存重叠问题
+	// [Safety Fix] 显式分配完整缓冲区，避免切片自动扩容带来的潜在内存重叠问题
 	// 总长度 = IV长度(12) + 明文长度 + Tag长度(16)
 	totalLen := MandalaIVLen + len(plaintext) + aesgcm.Overhead()
 	ciphertext := make([]byte, totalLen)
@@ -98,9 +100,7 @@ func MandalaPack(password string, plaintext []byte) ([]byte, error) {
 	}
 
 	// 2. 执行加密
-	// Seal(dst, nonce, plaintext, data)
-	// 我们将 ciphertext[:MandalaIVLen] 作为 dst 传入。
-	// Seal 会将加密结果（Ciphertext+Tag）追加到 dst 后面。
+	// Seal 将加密结果（Ciphertext+Tag）追加到 dst (ciphertext[:MandalaIVLen]) 后面
 	// 最终 ciphertext 变量将包含：[IV ... Ciphertext ... Tag]
 	aesgcm.Seal(ciphertext[:MandalaIVLen], iv, plaintext, nil)
 
