@@ -25,7 +25,7 @@ type OutboundConfig struct {
 	Settings struct {
 		VpnMode  bool `json:"vpn_mode"`
 		Fragment bool `json:"fragment"` // TLS 分片开关
-		Noise    bool `json:"noise"`    // 随机填充开关
+		// Noise bool `json:"noise"`    // [Deprecated] 随机填充开关已废弃，新协议使用 AES-GCM 认证加密
 	} `json:"settings"`
 
 	// 高级配置
