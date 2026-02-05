@@ -25,7 +25,7 @@ type OutboundConfig struct {
 	Settings struct {
 		VpnMode  bool `json:"vpn_mode"`
 		Fragment bool `json:"fragment"` // TLS 分片开关
-		// Noise bool `json:"noise"`    // [Deprecated] 随机填充开关已废弃，新协议使用 AES-GCM 认证加密
+		// [Removed] Noise 字段已移除，AES-GCM 协议不再支持随机填充
 	} `json:"settings"`
 
 	// 高级配置
@@ -73,5 +73,11 @@ func ParseConfig(jsonStr string) (*OutboundConfig, error) {
 	if err != nil {
 		return nil, fmt.Errorf("config parse error: %v", err)
 	}
+
+	// [新增] 基础字段校验，防止传入了不匹配的 JSON (如空对象) 导致连接时出现奇怪错误
+	if cfg.Server == "" || cfg.ServerPort == 0 {
+		return nil, fmt.Errorf("invalid config: server address or port is missing (parsed: %s:%d)", cfg.Server, cfg.ServerPort)
+	}
+
 	return &cfg, nil
 }
