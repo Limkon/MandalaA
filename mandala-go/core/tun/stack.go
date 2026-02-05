@@ -131,8 +131,16 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 
 	switch strings.ToLower(s.config.Type) {
 	case "mandala":
-		client := protocol.NewMandalaClient(s.config.Username, s.config.Password)
+		// [Fix] 兼容性修复：Mandala 的密钥通常是 UUID
+		// 如果 Password 字段为空，尝试使用 UUID 字段
+		password := s.config.Password
+		if password == "" {
+			password = s.config.UUID
+		}
+
+		client := protocol.NewMandalaClient(s.config.Username, password)
 		payload, hErr = client.BuildHandshakePayload(targetHost, targetPort, s.config.Settings.Noise)
+
 	case "trojan":
 		payload, hErr = protocol.BuildTrojanPayload(s.config.Password, targetHost, targetPort)
 	case "vless":
@@ -283,7 +291,13 @@ func (s *Stack) handleRemoteDNS(localConn *gonet.UDPConn) {
 	
 	switch strings.ToLower(s.config.Type) {
 	case "mandala":
-		client := protocol.NewMandalaClient(s.config.Username, s.config.Password)
+		// [Fix] DNS 部分也要修复
+		password := s.config.Password
+		if password == "" {
+			password = s.config.UUID
+		}
+
+		client := protocol.NewMandalaClient(s.config.Username, password)
 		payload, _ = client.BuildHandshakePayload("8.8.8.8", 53, s.config.Settings.Noise)
 	case "trojan":
 		payload, _ = protocol.BuildTrojanPayload(s.config.Password, "8.8.8.8", 53)
