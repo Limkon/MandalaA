@@ -17,6 +17,9 @@ require (
 	// ECH 握手
 	github.com/refraction-networking/utls v1.6.7
 	
+	// [New] 加密扩展库 (用于 PBKDF2)
+	golang.org/x/crypto v0.25.0
+
 	// 网络库
 	golang.org/x/net v0.27.0
 
