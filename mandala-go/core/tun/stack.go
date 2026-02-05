@@ -296,6 +296,7 @@ func (s *Stack) handleRemoteDNS(localConn *gonet.UDPConn) {
 		if password == "" {
 			password = s.config.UUID
 		}
+
 		client := protocol.NewMandalaClient(s.config.Username, password)
 		payload, _ = client.BuildHandshakePayload("8.8.8.8", 53, s.config.Settings.Noise)
 
