@@ -17,6 +17,10 @@ require (
 	// ECH 握手
 	github.com/refraction-networking/utls v1.6.7
 	
+	// [Added] 加密库 (用于 PBKDF2 和 AES-GCM)
+	// 必须添加此行，否则编译会报错 "missing go.sum entry"
+	golang.org/x/crypto v0.25.0
+	
 	// 网络库
 	golang.org/x/net v0.27.0
 
