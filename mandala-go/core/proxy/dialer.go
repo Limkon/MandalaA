@@ -38,16 +38,33 @@ func NewDialer(cfg *config.OutboundConfig) *Dialer {
 	return &Dialer{Config: cfg}
 }
 
-// Dial 主入口
+// Dial 主入口：实现了 H2 -> H1 的退回机制
 func (d *Dialer) Dial() (net.Conn, error) {
-	// [Fix] 直接强制使用 http/1.1 (forceH1 = true)
-	// 不再尝试 h2，避免"连接->断开->重连"的特征被 Cloudflare 识别为攻击
-	conn, _, err := d.handshake(true)
+	// 尝试 1: 默认模式 (允许 h2，指纹最真实)
+	// false 表示不强制移除 h2
+	conn, negotiated, err := d.handshake(false)
 	if err != nil {
 		return nil, err
 	}
 
-	// 握手完成，conn 已经准备好
+	// 检查协商结果
+	if negotiated == "h2" {
+		// 如果服务端选择了 h2，我们的 WebSocket 库无法处理
+		// 因此关闭连接，触发退回机制
+		fmt.Println("[Handshake] 协商结果为 h2，WebSocket 不支持，正在退回 http/1.1 重试...")
+		conn.Close()
+
+		// 尝试 2: 退回模式 (强制 http/1.1)
+		// true 表示强制移除 h2
+		conn, negotiated, err = d.handshake(true)
+		if err != nil {
+			return nil, fmt.Errorf("fallback handshake failed: %v", err)
+		}
+		// fmt.Printf("[Handshake] 重试协商结果: %s\n", negotiated)
+	}
+
+	// 握手完成，conn 已经准备好（可能是 TCP 或 uTLS 连接）
+	// 接下来处理 WebSocket 升级
 	if d.Config.Transport != nil && d.Config.Transport.Type == "ws" {
 		return d.upgradeWebsocket(conn)
 	}
@@ -56,7 +73,8 @@ func (d *Dialer) Dial() (net.Conn, error) {
 }
 
 // handshake 执行底层的 TCP 连接和 TLS 握手
-// forceH1: 是否强制只使用 http/1.1
+// forceH1: 是否强制只使用 http/1.1 (剔除 h2)
+// 返回: 连接对象, 协商出的协议(ALPN), 错误
 func (d *Dialer) handshake(forceH1 bool) (net.Conn, string, error) {
 	// 1. 基础 TCP 连接
 	targetAddr := fmt.Sprintf("%s:%d", d.Config.Server, d.Config.ServerPort)
@@ -76,6 +94,7 @@ func (d *Dialer) handshake(forceH1 bool) (net.Conn, string, error) {
 		echConfigList = d.getECHConfig()
 	}
 
+	// ECH 必须配合 TLS 1.3
 	minVer := uint16(tls.VersionTLS12)
 	if len(echConfigList) > 0 {
 		minVer = tls.VersionTLS13
@@ -85,8 +104,8 @@ func (d *Dialer) handshake(forceH1 bool) (net.Conn, string, error) {
 		ServerName:         d.Config.TLS.ServerName,
 		InsecureSkipVerify: d.Config.TLS.Insecure,
 		MinVersion:         minVer,
-		// 只声明支持 http/1.1，匹配我们的强制逻辑
-		NextProtos:                     []string{"http/1.1"},
+		// 默认声称支持 h2 和 http/1.1 (模拟 Chrome)
+		NextProtos:                     []string{"h2", "http/1.1"},
 		EncryptedClientHelloConfigList: echConfigList,
 	}
 
@@ -94,22 +113,24 @@ func (d *Dialer) handshake(forceH1 bool) (net.Conn, string, error) {
 		uTlsConfig.ServerName = d.Config.Server
 	}
 
+	// 处理 Fragment
 	if d.Config.Settings.Fragment {
 		conn = &FragmentConn{Conn: conn, active: true}
 	}
 
+	// 使用 HelloCustom 以便修改指纹
 	uConn := utls.UClient(conn, uTlsConfig, utls.HelloCustom)
 	
-	// [Fix] 使用 Android OkHttp 指纹
-	// 相比 Chrome，Android 客户端仅支持 http/1.1 是非常合理的，不会被 CF 拦截
-	spec, err := utls.UTLSIdToSpec(utls.HelloAndroid_11_OkHttp)
+	// 加载 Chrome 模版
+	spec, err := utls.UTLSIdToSpec(utls.HelloChrome_Auto)
 	if err != nil {
 		conn.Close()
 		return nil, "", fmt.Errorf("spec error: %v", err)
 	}
 
-	// 强制只留 http/1.1
+	// [关键逻辑] 根据 forceH1 参数调整 ALPN
 	if forceH1 {
+		// 强制剔除 h2，只留 http/1.1
 		foundALPN := false
 		for i, ext := range spec.Extensions {
 			if alpn, ok := ext.(*utls.ALPNExtension); ok {
@@ -122,6 +143,9 @@ func (d *Dialer) handshake(forceH1 bool) (net.Conn, string, error) {
 		if !foundALPN {
 			spec.Extensions = append(spec.Extensions, &utls.ALPNExtension{AlpnProtocols: []string{"http/1.1"}})
 		}
+	} else {
+		// 默认模式：保持 spec 原样 (通常包含 h2 和 http/1.1)
+		// 这让指纹看起来最像真实的 Chrome
 	}
 
 	if err := uConn.ApplyPreset(&spec); err != nil {
@@ -134,10 +158,11 @@ func (d *Dialer) handshake(forceH1 bool) (net.Conn, string, error) {
 		return nil, "", fmt.Errorf("handshake failed: %v", err)
 	}
 
+	// 返回协商出的协议 (例如 "h2" 或 "http/1.1")
 	return uConn, uConn.ConnectionState().NegotiatedProtocol, nil
 }
 
-// getECHConfig 保持不变
+// getECHConfig 封装 ECH 获取与缓存逻辑
 func (d *Dialer) getECHConfig() []byte {
 	queryDomain := d.Config.TLS.ECHPublicName
 	if queryDomain == "" {
@@ -174,9 +199,17 @@ func (d *Dialer) getECHConfig() []byte {
 	return nil
 }
 
-// upgradeWebsocket 保持不变
+// upgradeWebsocket 封装 WebSocket 握手逻辑
 func (d *Dialer) upgradeWebsocket(conn net.Conn) (net.Conn, error) {
 	scheme := "ws"
+	// 如果是 TLS 连接，scheme 需用 wss 标记逻辑（虽然底层已加密，但库行为需要）
+	// 修正：由于我们是自己 dial 的 TLS conn，对于 websocket 库来说，这就是一个普通的 RWC (ReadWriteCloser)。
+	// 为了避免 websocket 库再次尝试 TLS 握手，这里 scheme 用 "ws"，
+	// 并且通过 DialContext 返回我们已经握手好的 conn。
+	
+	// 注意：Scheme 必须匹配，如果底层是 TLS，通常 url 看起来是 wss://，但这里我们欺骗库
+	// 让他只发 HTTP Upgrade 包。
+	
 	path := d.Config.Transport.Path
 	if path == "" {
 		path = "/"
@@ -223,7 +256,7 @@ func (d *Dialer) upgradeWebsocket(conn net.Conn) (net.Conn, error) {
 	return websocket.NetConn(context.Background(), wsConn, websocket.MessageBinary), nil
 }
 
-// resolveECHConfig 保持不变
+// resolveECHConfig (保持不变)
 func resolveECHConfig(ctx context.Context, dohURL string, domain string) ([]byte, error) {
 	msg := new(dns.Msg)
 	msg.SetQuestion(dns.Fqdn(domain), dns.TypeHTTPS)
