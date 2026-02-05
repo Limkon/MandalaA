@@ -131,8 +131,8 @@ func (s *Stack) handleTCP(r *tcp.ForwarderRequest) {
 
 	switch strings.ToLower(s.config.Type) {
 	case "mandala":
-		// [Fix] 兼容性修复：Mandala 的密钥通常是 UUID
-		// 如果 Password 字段为空，尝试使用 UUID 字段
+		// [Fix] 兼容性修复：优先读取 Password，若为空则读取 UUID
+		// 确保无论安卓端如何传参，都能拿到密钥
 		password := s.config.Password
 		if password == "" {
 			password = s.config.UUID
