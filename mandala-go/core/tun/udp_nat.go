@@ -105,7 +105,7 @@ func (m *UDPNatManager) GetOrCreate(key string, localConn *gonet.UDPConn, target
 	switch strings.ToLower(m.config.Type) {
 	case "mandala":
 		client := protocol.NewMandalaClient(m.config.Username, m.config.Password)
-		// [Fix] 移除 Noise 参数 (协议已升级为 AES-GCM，不再需要随机填充配置)
+		// [Fixed] Removed Noise parameter
 		payload, hErr = client.BuildHandshakePayload(targetIP, targetPort)
 	case "trojan":
 		payload, hErr = protocol.BuildTrojanPayload(m.config.Password, targetIP, targetPort)
