@@ -24,9 +24,9 @@ func NewMandalaClient(username, password string) *MandalaClient {
 
 // BuildHandshakePayload 构造 Mandala 协议的握手包
 // [Refactor] 2026-02-04: Updated to use AES-256-GCM + PBKDF2 (1000 iter)
-// useNoise parameter is ignored in this version as GCM provides semantic security
 func (c *MandalaClient) BuildHandshakePayload(targetHost string, targetPort int, useNoise bool) ([]byte, error) {
-	// log.Printf("[Mandala] 开始构造握手包 (AES-GCM) -> %s:%d", targetHost, targetPort)
+	// [Debug] 打印调试信息，确认密码是否为空
+	log.Printf("[Mandala] 开始构造握手包 -> 目标: %s:%d | 密码长度: %d", targetHost, targetPort, len(c.Password))
 
 	// 1. Construct Plaintext Payload
 	// Format: [CMD(1)] [ATYP(1)] [ADDR(Var)] [PORT(2)]
@@ -41,11 +41,9 @@ func (c *MandalaClient) BuildHandshakePayload(targetHost string, targetPort int,
 		if ip4 := ip.To4(); ip4 != nil {
 			buf.WriteByte(0x01) // ATYP_IPV4
 			buf.Write(ip4)
-			// log.Printf("[Mandala] 目标类型: IPv4")
 		} else {
 			buf.WriteByte(0x04) // ATYP_IPV6
 			buf.Write(ip.To16())
-			// log.Printf("[Mandala] 目标类型: IPv6")
 		}
 	} else {
 		if len(targetHost) > 255 {
@@ -54,7 +52,6 @@ func (c *MandalaClient) BuildHandshakePayload(targetHost string, targetPort int,
 		buf.WriteByte(0x03) // ATYP_DOMAIN
 		buf.WriteByte(byte(len(targetHost)))
 		buf.WriteString(targetHost)
-		// log.Printf("[Mandala] 目标类型: 域名 (%s)", targetHost)
 	}
 
 	// 1.3 Port (2 bytes Big Endian)
@@ -62,16 +59,14 @@ func (c *MandalaClient) BuildHandshakePayload(targetHost string, targetPort int,
 	binary.BigEndian.PutUint16(portBuf, uint16(targetPort))
 	buf.Write(portBuf)
 
-	// Note: No CRLF in the new protocol design for AES-GCM payload
-
 	// 2. Encrypt Payload using AES-256-GCM
 	// The Password (UUID) is used as the key source
 	encryptedBytes, err := MandalaPack(c.Password, buf.Bytes())
 	if err != nil {
-		log.Printf("[Mandala] Encryption failed: %v", err)
+		log.Printf("[Mandala] 加密失败: %v", err)
 		return nil, err
 	}
 
-	// log.Printf("[Mandala] 握手包构造完成 (AES-GCM)，总长度: %d", len(encryptedBytes))
+	log.Printf("[Mandala] 握手包构造完成 (AES-GCM)，Payload长度: %d", len(encryptedBytes))
 	return encryptedBytes, nil
 }
