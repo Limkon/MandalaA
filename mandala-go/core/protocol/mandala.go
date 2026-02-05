@@ -2,8 +2,6 @@ package protocol
 
 import (
 	"bytes"
-	"crypto/aes"
-	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
@@ -12,131 +10,125 @@ import (
 	"io"
 	"log"
 	"net"
-	"strings"
-
-	"golang.org/x/crypto/pbkdf2"
 )
 
-// 常量定义
-const (
-	MandalaSalt   = "mandala-protocol-salt-v1"
-	MandalaIter   = 1000
-	MandalaKeyLen = 32 // 256 bits
-	MandalaIVLen  = 12 // GCM IV
-	MandalaTagLen = 16 // GCM Tag
-)
-
+// MandalaClient 处理 Mandala 协议的客户端逻辑
 type MandalaClient struct {
 	Username string
 	Password string
-	key      []byte
 }
 
+// NewMandalaClient 创建一个新的 Mandala 客户端实例
 func NewMandalaClient(username, password string) *MandalaClient {
-	// 去除首尾空格，防止输入法误触
-	cleanPassword := strings.TrimSpace(password)
-	
-	c := &MandalaClient{
+	return &MandalaClient{
 		Username: username,
-		Password: cleanPassword,
+		Password: password,
 	}
-	c.deriveKey()
-	return c
-}
-
-func (c *MandalaClient) deriveKey() {
-	if c.Password == "" {
-		log.Printf("[Mandala] 错误：密码为空！")
-		return
-	}
-
-	// [核心修改] 尝试模拟 C 语言 sizeof 的行为
-	// 很多 C 代码会错误地使用 sizeof("string")，导致 salt 包含一个看不见的 '\0'
-	// Go 默认不包含这个 '\0'。为了兼容，我们手动加上它。
-	saltBytes := []byte(MandalaSalt)
-	
-	// *** 如果这次还是连不上，请尝试注释掉下面这一行 (append) 再试 ***
-	// 或者是服务端使用了 sizeof(password) 导致密码也多了 \0 ?
-	// 目前先假设是 Salt 的问题，因为 Salt 是硬编码常量，容易用错 sizeof
-	// saltBytes = append(saltBytes, 0x00) // 暂不默认开启，先通过打印对比
-
-	// 方案 A: 标准行为 (不加 \0)
-	c.key = pbkdf2.Key([]byte(c.Password), saltBytes, MandalaIter, MandalaKeyLen, sha256.New)
-	log.Printf("[Mandala] Key (Standard): %s", hex.EncodeToString(c.key))
-
-	// 方案 B: 兼容 C 语言 sizeof 行为 (Salt + \0)
-	// 如果标准行为失败，请手动将下面这段代码取消注释，并注释掉上面的 方案 A
-	/*
-	saltWithNull := append([]byte(MandalaSalt), 0x00)
-	c.key = pbkdf2.Key([]byte(c.Password), saltWithNull, MandalaIter, MandalaKeyLen, sha256.New)
-	log.Printf("[Mandala] Key (C-Style \0): %s", hex.EncodeToString(c.key))
-	*/
 }
 
 // BuildHandshakePayload 构造 Mandala 协议的握手包
-func (c *MandalaClient) BuildHandshakePayload(targetHost string, targetPort int) ([]byte, error) {
-	if len(c.key) == 0 {
-		c.deriveKey()
-		if len(c.key) == 0 {
-			return nil, errors.New("failed to derive key")
-		}
-	}
+// [Refactor] 使用 Xorshift128+ 替代简单的 Salt XOR
+func (c *MandalaClient) BuildHandshakePayload(targetHost string, targetPort int, useNoise bool) ([]byte, error) {
+	log.Printf("[Mandala] 开始构造握手包 -> %s:%d", targetHost, targetPort)
 
+	// 1. 生成随机 Salt (4 bytes)
+	salt := make([]byte, 4)
+	if _, err := io.ReadFull(rand.Reader, salt); err != nil {
+		return nil, err
+	}
+	// log.Printf("[Mandala] 生成随机 Salt: %x", salt)
+
+	// 2. 准备明文 Payload
 	var buf bytes.Buffer
 
-	// 1. CMD (0x01)
+	// 2.1 哈希 ID (SHA224 Hex String, 56 bytes)
+	hash := sha256.Sum224([]byte(c.Password))
+	hashHex := hex.EncodeToString(hash[:])
+	if len(hashHex) != 56 {
+		return nil, errors.New("hash generation failed")
+	}
+	buf.WriteString(hashHex)
+	// log.Printf("[Mandala] 密码哈希已生成 (56字节)")
+
+	// 2.2 随机填充 (Padding)
+	var padLen int
+	b := make([]byte, 1)
+
+	// [Fix] 健壮的随机数读取
+	if _, err := io.ReadFull(rand.Reader, b); err != nil {
+		return nil, err
+	}
+
+	if useNoise {
+		// 启用噪音模式：填充 32 ~ 159 字节
+		padLen = 32 + int(b[0]%128)
+	} else {
+		// 标准模式：填充 0 ~ 15 字节
+		padLen = int(b[0] % 16)
+	}
+
+	buf.WriteByte(byte(padLen)) // 写入填充长度字节
+
+	if padLen > 0 {
+		padding := make([]byte, padLen)
+		if _, err := io.ReadFull(rand.Reader, padding); err != nil {
+			return nil, err
+		}
+		buf.Write(padding)
+	}
+	// log.Printf("[Mandala] 添加随机填充长度: %d (Noise: %v)", padLen, useNoise)
+
+	// 2.3 指令 CMD (0x01 Connect)
 	buf.WriteByte(0x01)
 
-	// 2. Address & Port
-	// 严格按照 [ATYP] [ADDR] [PORT] 顺序
+	// 2.4 目标地址 (SOCKS5 格式)
 	ip := net.ParseIP(targetHost)
 	if ip != nil {
 		if ip4 := ip.To4(); ip4 != nil {
-			buf.WriteByte(0x01) // IPv4
+			buf.WriteByte(0x01)
 			buf.Write(ip4)
+			log.Printf("[Mandala] 目标类型: IPv4")
 		} else {
-			buf.WriteByte(0x04) // IPv6
+			buf.WriteByte(0x04)
 			buf.Write(ip.To16())
+			log.Printf("[Mandala] 目标类型: IPv6")
 		}
 	} else {
 		if len(targetHost) > 255 {
 			return nil, errors.New("domain too long")
 		}
-		buf.WriteByte(0x03) // Domain
+		buf.WriteByte(0x03)
 		buf.WriteByte(byte(len(targetHost)))
 		buf.WriteString(targetHost)
+		log.Printf("[Mandala] 目标类型: 域名 (%s)", targetHost)
 	}
 
-	// 3. Port (Big Endian)
+	// 2.5 端口 (2 bytes Big Endian)
 	portBuf := make([]byte, 2)
 	binary.BigEndian.PutUint16(portBuf, uint16(targetPort))
 	buf.Write(portBuf)
 
+	// 2.6 CRLF (0x0D 0x0A)
+	buf.Write([]byte{0x0D, 0x0A})
+
+	// 3. 构造最终包 (Salt + Xorshift128+ Encrypted Payload)
 	plaintext := buf.Bytes()
-	
-	// [Debug] 打印明文，确保没有混入奇怪的字节
-	// log.Printf("[Mandala] Plaintext: %s", hex.EncodeToString(plaintext))
+	finalSize := 4 + len(plaintext)
+	finalBuf := make([]byte, finalSize)
 
-	return c.mandalaPack(plaintext)
-}
+	// 3.1 写入头部 Salt
+	copy(finalBuf[0:4], salt)
 
-func (c *MandalaClient) mandalaPack(plaintext []byte) ([]byte, error) {
-	block, err := aes.NewCipher(c.key)
-	if err != nil {
-		return nil, err
-	}
+	// 3.2 写入明文到缓冲区 (从第4字节开始)
+	copy(finalBuf[4:], plaintext)
 
-	aesgcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, err
-	}
+	// 3.3 初始化流加密 (Key=Password, Salt=Salt)
+	// [Critical] 使用与服务端一致的加密算法 (定义在 crypto.go 中)
+	cipher := NewStreamCipher([]byte(c.Password), salt)
 
-	iv := make([]byte, MandalaIVLen)
-	if _, err := io.ReadFull(rand.Reader, iv); err != nil {
-		return nil, err
-	}
+	// 3.4 对 Buffer 的数据部分（跳过 Salt）进行原地加密
+	cipher.Process(finalBuf[4:])
 
-	// Seal: IV + Cipher + Tag
-	ciphertext := aesgcm.Seal(iv, iv, plaintext, nil)
-	return ciphertext, nil
+	log.Printf("[Mandala] 握手包构造完成 (Xorshift128+)，总长度: %d", finalSize)
+	return finalBuf, nil
 }

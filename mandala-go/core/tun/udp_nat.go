@@ -105,8 +105,7 @@ func (m *UDPNatManager) GetOrCreate(key string, localConn *gonet.UDPConn, target
 	switch strings.ToLower(m.config.Type) {
 	case "mandala":
 		client := protocol.NewMandalaClient(m.config.Username, m.config.Password)
-		// [Fixed] Removed Noise parameter
-		payload, hErr = client.BuildHandshakePayload(targetIP, targetPort)
+		payload, hErr = client.BuildHandshakePayload(targetIP, targetPort, m.config.Settings.Noise)
 	case "trojan":
 		payload, hErr = protocol.BuildTrojanPayload(m.config.Password, targetIP, targetPort)
 	case "vless":
